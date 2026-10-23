@@ -111,6 +111,7 @@ export async function persistSnapshotToOfflineVault(state: VaultState): Promise<
     replaceStoreItems<StorageAccount>('accounts', state.accounts),
     putStoreItem('meta', {
       key: 'vault_snapshot_meta',
+      vaultId: state.vaultId || null,
       settings: state.settings,
       summary: state.summary,
       providersCatalog: state.providersCatalog,
@@ -118,6 +119,31 @@ export async function persistSnapshotToOfflineVault(state: VaultState): Promise<
       savedAt: new Date().toISOString(),
     }),
   ]);
+}
+
+export async function clearAllOfflineStores(): Promise<void> {
+  const db = await openVaultDb();
+  const storeNames = ['folders', 'files', 'blobs', 'api_keys', 'accounts', 'sync_queue', 'meta'];
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeNames, 'readwrite');
+    for (const s of storeNames) {
+      if (db.objectStoreNames.contains(s)) {
+        tx.objectStore(s).clear();
+      }
+    }
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function ensureOfflineVaultMatchesId(expectedVaultId: string): Promise<void> {
+  const meta = await getStoreItem<{ key: string; vaultId?: string | null }>(
+    'meta',
+    'vault_snapshot_meta'
+  );
+  if (meta?.vaultId && expectedVaultId && meta.vaultId !== expectedVaultId) {
+    await clearAllOfflineStores();
+  }
 }
 
 export async function loadOfflineSnapshot(): Promise<VaultState | null> {

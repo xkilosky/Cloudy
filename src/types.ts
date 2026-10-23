@@ -126,6 +126,48 @@ export interface VaultState {
   aiAuditLog: AiAuditEntry[];
 }
 
+export interface AuthUser {
+  id: string;
+  email: string;
+  displayName: string;
+  vaultId: string;
+  avatarColor: string;
+  theme: 'deepseek' | 'claude' | 'chatgpt' | 'qwen';
+  lastLoginAt?: string | null;
+  createdAt: string;
+}
+
+export interface UserSessionItem {
+  id: string;
+  deviceLabel: string;
+  ipAddress: string;
+  createdAt: string;
+  lastSeenAt: string;
+  expiresAt: string;
+  isCurrent: boolean;
+}
+
+export interface DatabaseTableInfo {
+  name: string;
+  label: string;
+  description: string;
+  rowCount: number;
+  rows: Record<string, unknown>[];
+}
+
+export interface DatabaseOverview {
+  ok: boolean;
+  engine: 'supabase_postgres' | 'local_relational_mirror';
+  engineLabel: string;
+  postgresConnected: boolean;
+  rlsEnabled: boolean;
+  latencyMs: number;
+  vaultId: string;
+  totalRows: number;
+  syncedAt: string;
+  tables: DatabaseTableInfo[];
+}
+
 export interface SyncQueueAction {
   id: string;
   type:

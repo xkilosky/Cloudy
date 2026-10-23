@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
-import { Search, Wifi, WifiOff, RefreshCw, X } from 'lucide-react';
+import { Search, Wifi, WifiOff, RefreshCw, X, LogIn } from 'lucide-react';
+import type { AuthUser } from '../types';
 import { STUDIO_THEMES, type StudioTheme } from '../lib/theme';
 
 interface TopBarProps {
@@ -13,6 +14,9 @@ interface TopBarProps {
   pendingSyncCount: number;
   theme: StudioTheme;
   onChangeTheme: (theme: StudioTheme) => void;
+  authUser: AuthUser | null;
+  onOpenAccountTab: () => void;
+  onOpenAuthScreen: () => void;
 }
 
 export const TopBar: React.FC<TopBarProps> = ({
@@ -25,6 +29,9 @@ export const TopBar: React.FC<TopBarProps> = ({
   pendingSyncCount,
   theme,
   onChangeTheme,
+  authUser,
+  onOpenAccountTab,
+  onOpenAuthScreen,
 }) => {
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -78,7 +85,7 @@ export const TopBar: React.FC<TopBarProps> = ({
         )}
       </div>
 
-      {/* Right Controls: Mobile Theme Dots + Live Auto-Sync Controls */}
+      {/* Right Controls: Mobile Theme Dots + Live Auto-Sync + Account Avatar */}
       <div className="flex items-center gap-2 shrink-0">
         <div className="flex lg:hidden items-center gap-1 bg-surface border border-line rounded-full px-2 py-1">
           {STUDIO_THEMES.map((t) => (
@@ -134,7 +141,7 @@ export const TopBar: React.FC<TopBarProps> = ({
             <>
               <WifiOff className="w-3.5 h-3.5" />
               <span>
-                Offline Vault{pendingSyncCount > 0 ? ` (${pendingSyncCount})` : ''}
+                Offline{pendingSyncCount > 0 ? ` (${pendingSyncCount})` : ''}
               </span>
             </>
           ) : (
@@ -146,6 +153,29 @@ export const TopBar: React.FC<TopBarProps> = ({
             </>
           )}
         </motion.button>
+
+        {authUser ? (
+          <motion.button
+            whileHover={{ scale: 1.04 }}
+            whileTap={{ scale: 0.96 }}
+            onClick={onOpenAccountTab}
+            title={`${authUser.displayName} (${authUser.email}) — Database & Account`}
+            className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-semibold border border-white/15 shadow-card shrink-0"
+            style={{ backgroundColor: authUser.avatarColor || '#4D6BFE' }}
+          >
+            {(authUser.displayName || authUser.email).slice(0, 2).toUpperCase()}
+          </motion.button>
+        ) : (
+          <motion.button
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.97 }}
+            onClick={onOpenAuthScreen}
+            className="px-3 py-1.5 rounded-full bg-accent hover:bg-accent-hover text-white text-xs font-medium flex items-center gap-1.5 shadow-card transition-colors"
+          >
+            <LogIn className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Sign In</span>
+          </motion.button>
+        )}
       </div>
     </header>
   );

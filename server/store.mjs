@@ -7,6 +7,7 @@ import {
   unsealCredentials,
   hasRealUpstreamCredentials,
 } from './cloudAdapters.mjs';
+import { syncVaultRelationalTables } from './authDb.mjs';
 
 export const DATA_DIR = process.env.VERCEL
   ? '/tmp/cloudy-data'
@@ -223,6 +224,7 @@ async function fetchRemoteVaultState(vaultId) {
           apikey: sbKey,
           Authorization: `Bearer ${sbKey}`,
         },
+        signal: AbortSignal.timeout(4000),
       }
     );
     if (!res.ok) return null;
@@ -240,6 +242,7 @@ function pushRemoteVaultState(vaultId, db) {
 
   const snapshotJson = JSON.stringify({
     vault_id: vaultId,
+    user_id: db.ownerUserId || null,
     state_json: db,
     updated_at: new Date().toISOString(),
   });
@@ -247,8 +250,8 @@ function pushRemoteVaultState(vaultId, db) {
   const prev = pendingRemoteSaves.get(vaultId) || Promise.resolve();
   const nextPromise = prev
     .catch(() => {})
-    .then(() =>
-      fetch(`${sbUrl}/rest/v1/cloudy_vault_states?on_conflict=vault_id`, {
+    .then(async () => {
+      await fetch(`${sbUrl}/rest/v1/cloudy_vault_states?on_conflict=vault_id`, {
         method: 'POST',
         headers: {
           apikey: sbKey,
@@ -257,8 +260,10 @@ function pushRemoteVaultState(vaultId, db) {
           Prefer: 'resolution=merge-duplicates',
         },
         body: snapshotJson,
-      })
-    )
+        signal: AbortSignal.timeout(4000),
+      });
+      await syncVaultRelationalTables(vaultId, db);
+    })
     .catch(() => {})
     .finally(() => {
       if (pendingRemoteSaves.get(vaultId) === nextPromise) {

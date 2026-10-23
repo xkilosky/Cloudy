@@ -2,6 +2,7 @@ import express from 'express';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import {
   loadDb,
   ensureVaultLoaded,
@@ -20,6 +21,26 @@ import {
   normalizeVaultId,
   makeId,
 } from './store.mjs';
+import {
+  hashPassword,
+  verifyPassword,
+  validateEmailFormat,
+  findUserByEmail,
+  findUserByVaultId,
+  createUserRecord,
+  updateUserRecord,
+  sanitizeUser,
+  createSessionForUser,
+  extractSessionToken,
+  setSessionCookie,
+  clearSessionCookie,
+  resolveAuthSession,
+  revokeSessionByToken,
+  revokeSessionByIdForUser,
+  listSessionsForUser,
+  syncVaultRelationalTables,
+  buildDatabaseOverview,
+} from './authDb.mjs';
 import {
   FREE_PROVIDER_CATALOG,
   getProviderMeta,
@@ -63,10 +84,13 @@ const upload = multer({
 });
 
 function reqVaultId(req) {
+  if (req.authUser?.vault_id) {
+    return normalizeVaultId(req.authUser.vault_id);
+  }
   return normalizeVaultId(req.headers['x-cloudy-vault-id'] || req.query.vaultId || 'default');
 }
 
-// Auto-hydrate vault state from durable Supabase PostgreSQL on serverless cold starts
+// Auto-hydrate auth session & vault state from durable Supabase PostgreSQL on serverless cold starts
 // and flush any pending Supabase writes before serverless responses complete
 app.use('/api', async (req, res, next) => {
   const origJson = res.json.bind(res);
@@ -77,12 +101,332 @@ app.use('/api', async (req, res, next) => {
     return res;
   };
 
-  try {
-    await ensureVaultLoaded(reqVaultId(req));
-  } catch {
-    // non-fatal fallback to local vault
+  // Scoped AI API (/api/v1/ai/*), OAuth callback, and Android static info handle their own auth/state
+  if (req.path.startsWith('/v1/ai')) {
+    return next();
   }
+
+  try {
+    const authCtx = await resolveAuthSession(req);
+    if (authCtx) {
+      req.authSession = authCtx;
+      req.authUser = authCtx.user;
+    }
+  } catch {
+    // non-fatal session check
+  }
+
+  if (req.path.startsWith('/auth/') || req.path === '/oauth/callback' || req.path.startsWith('/android/')) {
+    return next();
+  }
+
+  const targetVaultId = reqVaultId(req);
+  let db = null;
+  try {
+    db = await ensureVaultLoaded(targetVaultId);
+  } catch {
+    db = loadDb(targetVaultId);
+  }
+
+  // Enforce strict vault ownership: if a vault is bound to a registered Cloudy user,
+  // only that authenticated user can access or modify it!
+  let ownerUserId = db?.ownerUserId || null;
+  if (!ownerUserId && targetVaultId !== 'default') {
+    const ownerRow = await findUserByVaultId(targetVaultId);
+    if (ownerRow) {
+      ownerUserId = ownerRow.id;
+      if (db) {
+        db.ownerUserId = ownerRow.id;
+        db.ownerEmail = ownerRow.email;
+      }
+    }
+  }
+
+  if (ownerUserId && req.authUser?.id !== ownerUserId) {
+    return res.status(401).json({
+      ok: false,
+      code: 'AUTH_REQUIRED',
+      error: 'Authentication required to access this Cloudy user vault.',
+    });
+  }
+
   next();
+});
+
+// --- Cloudy User Authentication & Session Endpoints ---
+app.post('/api/auth/signup', async (req, res) => {
+  try {
+    const { email: rawEmail, password, displayName: rawName, theme } = req.body || {};
+    const email = validateEmailFormat(rawEmail);
+    if (!email) {
+      return res.status(400).json({ ok: false, error: 'Please enter a valid email address.' });
+    }
+    const pwd = String(password || '');
+    if (pwd.length < 6) {
+      return res
+        .status(400)
+        .json({ ok: false, error: 'Password must be at least 6 characters long.' });
+    }
+
+    const existing = await findUserByEmail(email);
+    if (existing) {
+      return res.status(409).json({
+        ok: false,
+        error: 'An account with this email already exists. Please sign in instead.',
+      });
+    }
+
+    const fallbackName = email
+      .split('@')[0]
+      .replace(/[._-]+/g, ' ')
+      .replace(/\b\w/g, (c) => c.toUpperCase());
+    const displayName = String(rawName || '').trim().slice(0, 80) || fallbackName;
+
+    // Claim the browser's existing unclaimed vault (if any) so connected accounts & files stay intact!
+    const candidateVid = normalizeVaultId(req.headers['x-cloudy-vault-id'] || '');
+    let assignedVaultId = `vlt_${crypto.randomBytes(12).toString('hex')}`;
+    if (candidateVid && candidateVid !== 'default') {
+      const candDb = await ensureVaultLoaded(candidateVid);
+      const existingOwner = candDb.ownerUserId || (await findUserByVaultId(candidateVid))?.id;
+      if (!existingOwner) {
+        assignedVaultId = candidateVid;
+      }
+    }
+
+    const passwordHash = await hashPassword(pwd);
+    const userRow = await createUserRecord({
+      email,
+      displayName,
+      passwordHash,
+      vaultId: assignedVaultId,
+      theme: ['deepseek', 'claude', 'chatgpt', 'qwen'].includes(theme) ? theme : 'deepseek',
+    });
+
+    const userDb = await ensureVaultLoaded(assignedVaultId);
+    userDb.ownerUserId = userRow.id;
+    userDb.ownerEmail = userRow.email;
+    await saveDb(assignedVaultId);
+    await syncVaultRelationalTables(assignedVaultId, userDb);
+
+    const { token } = await createSessionForUser(userRow, req);
+    setSessionCookie(res, token);
+
+    return res.status(201).json({
+      ok: true,
+      token,
+      vaultId: assignedVaultId,
+      user: sanitizeUser(userRow),
+    });
+  } catch (err) {
+    return res.status(400).json({ ok: false, error: String(err.message || err) });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email: rawEmail, password } = req.body || {};
+    const email = validateEmailFormat(rawEmail);
+    if (!email || !password) {
+      return res.status(400).json({ ok: false, error: 'Email and password are required.' });
+    }
+
+    const userRow = await findUserByEmail(email);
+    if (!userRow || !(await verifyPassword(String(password), userRow.password_hash))) {
+      return res.status(401).json({ ok: false, error: 'Invalid email or password.' });
+    }
+
+    const vaultId = normalizeVaultId(userRow.vault_id);
+    const userDb = await ensureVaultLoaded(vaultId);
+    userDb.ownerUserId = userRow.id;
+    userDb.ownerEmail = userRow.email;
+
+    // Non-destructively merge any real cloud accounts or custom items created in an unclaimed guest browser vault
+    const guestVid = normalizeVaultId(req.headers['x-cloudy-vault-id'] || '');
+    if (guestVid && guestVid !== 'default' && guestVid !== vaultId) {
+      const guestDb = await ensureVaultLoaded(guestVid);
+      const guestOwner = guestDb.ownerUserId || (await findUserByVaultId(guestVid))?.id;
+      if (!guestOwner) {
+        let merged = false;
+        for (const acc of guestDb.accounts || []) {
+          if (!isGenuineVerifiedAccount(acc)) continue;
+          const dup = userDb.accounts.some(
+            (a) =>
+              a.providerId === acc.providerId &&
+              String(a.email).toLowerCase() === String(acc.email).toLowerCase()
+          );
+          if (!dup) {
+            userDb.accounts.push(acc);
+            merged = true;
+          }
+        }
+        const existingFolderIds = new Set(userDb.folders.map((f) => f.id));
+        for (const fld of guestDb.folders || []) {
+          if (fld.id === 'fld_ai_knowledge' || fld.id === 'fld_documents') continue;
+          if (!existingFolderIds.has(fld.id)) {
+            userDb.folders.push(fld);
+            existingFolderIds.add(fld.id);
+            merged = true;
+          }
+        }
+        const existingFileIds = new Set(userDb.files.map((f) => f.id));
+        for (const fl of guestDb.files || []) {
+          if (fl.id === 'fil_welcome') continue;
+          if (!existingFileIds.has(fl.id)) {
+            userDb.files.push(fl);
+            existingFileIds.add(fl.id);
+            merged = true;
+          }
+        }
+        if (merged) {
+          await saveDb(vaultId);
+        }
+      }
+    }
+
+    const updatedUser =
+      (await updateUserRecord(userRow.id, { last_login_at: new Date().toISOString() })) ||
+      userRow;
+    await saveDb(vaultId);
+    await syncVaultRelationalTables(vaultId, userDb);
+
+    const { token } = await createSessionForUser(updatedUser, req);
+    setSessionCookie(res, token);
+
+    return res.json({
+      ok: true,
+      token,
+      vaultId,
+      user: sanitizeUser(updatedUser),
+    });
+  } catch (err) {
+    return res.status(400).json({ ok: false, error: String(err.message || err) });
+  }
+});
+
+app.post('/api/auth/logout', async (req, res) => {
+  try {
+    const token = extractSessionToken(req);
+    if (token) {
+      await revokeSessionByToken(token);
+    }
+    clearSessionCookie(res);
+    return res.json({ ok: true });
+  } catch (err) {
+    clearSessionCookie(res);
+    return res.json({ ok: true });
+  }
+});
+
+app.get('/api/auth/me', (req, res) => {
+  if (!req.authSession || !req.authUser) {
+    return res.json({ ok: true, authenticated: false, user: null });
+  }
+  setSessionCookie(res, req.authSession.token);
+  return res.json({
+    ok: true,
+    authenticated: true,
+    sessionId: req.authSession.session.id,
+    vaultId: req.authUser.vault_id,
+    user: sanitizeUser(req.authUser),
+  });
+});
+
+app.patch('/api/auth/profile', async (req, res) => {
+  if (!req.authUser) {
+    return res.status(401).json({ ok: false, error: 'Authentication required.' });
+  }
+  const { displayName, theme, avatarColor } = req.body || {};
+  const patch = {};
+  if (typeof displayName === 'string' && displayName.trim()) {
+    patch.display_name = displayName.trim().slice(0, 80);
+  }
+  if (['deepseek', 'claude', 'chatgpt', 'qwen'].includes(theme)) {
+    patch.theme = theme;
+  }
+  if (typeof avatarColor === 'string' && /^#[0-9a-fA-F]{6}$/.test(avatarColor)) {
+    patch.avatar_color = avatarColor;
+  }
+  const updated = (await updateUserRecord(req.authUser.id, patch)) || {
+    ...req.authUser,
+    ...patch,
+  };
+  return res.json({ ok: true, user: sanitizeUser(updated) });
+});
+
+app.post('/api/auth/password', async (req, res) => {
+  if (!req.authUser) {
+    return res.status(401).json({ ok: false, error: 'Authentication required.' });
+  }
+  const { currentPassword, newPassword } = req.body || {};
+  if (!currentPassword || !newPassword) {
+    return res
+      .status(400)
+      .json({ ok: false, error: 'Current password and new password are required.' });
+  }
+  if (String(newPassword).length < 6) {
+    return res
+      .status(400)
+      .json({ ok: false, error: 'New password must be at least 6 characters long.' });
+  }
+  const valid = await verifyPassword(String(currentPassword), req.authUser.password_hash);
+  if (!valid) {
+    return res.status(401).json({ ok: false, error: 'Current password is incorrect.' });
+  }
+  const nextHash = await hashPassword(String(newPassword));
+  await updateUserRecord(req.authUser.id, { password_hash: nextHash });
+  return res.json({ ok: true });
+});
+
+app.get('/api/auth/sessions', async (req, res) => {
+  if (!req.authUser) {
+    return res.status(401).json({ ok: false, error: 'Authentication required.' });
+  }
+  const sessions = await listSessionsForUser(
+    req.authUser.id,
+    req.authSession?.session?.id || null
+  );
+  return res.json({ ok: true, sessions });
+});
+
+app.delete('/api/auth/sessions/:sessionId', async (req, res) => {
+  if (!req.authUser) {
+    return res.status(401).json({ ok: false, error: 'Authentication required.' });
+  }
+  await revokeSessionByIdForUser(req.params.sessionId, req.authUser.id);
+  return res.json({ ok: true });
+});
+
+// --- Cloudy Relational Database Overview & Live Sync ---
+app.get('/api/database/overview', async (req, res) => {
+  try {
+    const db = loadDb(reqVaultId(req));
+    const overview = await buildDatabaseOverview({
+      userRow: req.authUser || null,
+      currentSessionId: req.authSession?.session?.id || null,
+      db,
+    });
+    return res.json(overview);
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: String(err.message || err) });
+  }
+});
+
+app.post('/api/database/sync', async (req, res) => {
+  try {
+    const vaultId = reqVaultId(req);
+    const db = loadDb(vaultId);
+    await saveDb(vaultId);
+    await syncVaultRelationalTables(vaultId, db);
+    await flushPendingSaves();
+    const overview = await buildDatabaseOverview({
+      userRow: req.authUser || null,
+      currentSessionId: req.authSession?.session?.id || null,
+      db,
+    });
+    return res.json(overview);
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: String(err.message || err) });
+  }
 });
 
 function getOAuthConfigForProvider(db, providerId) {

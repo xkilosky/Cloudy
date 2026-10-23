@@ -4,10 +4,12 @@ import {
   FolderClosed,
   Cloud,
   KeyRound,
+  Database,
   Smartphone,
   CheckCircle2,
 } from 'lucide-react';
 import type {
+  AuthUser,
   VaultState,
   FileItem,
   FolderItem,
@@ -20,12 +22,22 @@ import { DriveExplorer } from './components/DriveExplorer';
 import { FilePreviewModal } from './components/FilePreviewModal';
 import { ProvidersHub } from './components/ProvidersHub';
 import { AiApiKeysView } from './components/AiApiKeysView';
+import { AuthView } from './components/AuthView';
+import { DatabaseView } from './components/DatabaseView';
 import {
   AndroidView,
   type BeforeInstallPromptEvent,
 } from './components/AndroidView';
 import { syncVaultState } from './lib/syncEngine';
-import { apiFetch } from './lib/vaultClient';
+import {
+  apiFetch,
+  getCachedAuthUser,
+  updateCachedAuthUser,
+  clearAuthSession,
+  resetToFreshGuestVault,
+  isGuestModeEnabled,
+  setGuestModeEnabled,
+} from './lib/vaultClient';
 import {
   getSavedTheme,
   applyStudioTheme,
@@ -37,9 +49,15 @@ import {
   saveOfflineBlob,
   getOfflineBlob,
   enqueueOfflineAction,
+  clearAllOfflineStores,
 } from './lib/offlineDb';
 
 export function App() {
+  const [authUser, setAuthUser] = useState<AuthUser | null>(() =>
+    getCachedAuthUser()
+  );
+  const [guestMode, setGuestMode] = useState<boolean>(() => isGuestModeEnabled());
+  const [authReady, setAuthReady] = useState<boolean>(() => !navigator.onLine);
   const [vault, setVault] = useState<VaultState | null>(null);
   const [theme, setTheme] = useState<StudioTheme>(() => getSavedTheme());
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -47,7 +65,14 @@ export function App() {
   const [activeTab, setActiveTab] = useState<NavTab>(() => {
     const params = new URLSearchParams(window.location.search);
     const t = params.get('tab');
-    if (t === 'providers' || t === 'ai-keys' || t === 'android') return t;
+    if (
+      t === 'providers' ||
+      t === 'ai-keys' ||
+      t === 'database' ||
+      t === 'android'
+    ) {
+      return t;
+    }
     return 'files';
   });
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
@@ -64,6 +89,8 @@ export function App() {
   const [swReady, setSwReady] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
+  const canLoadWorkspace = authReady && (Boolean(authUser) || guestMode);
+
   useEffect(() => {
     applyStudioTheme(theme);
   }, [theme]);
@@ -71,11 +98,54 @@ export function App() {
   const handleChangeTheme = (next: StudioTheme) => {
     setTheme(next);
     applyStudioTheme(next);
+    if (authUser && navigator.onLine) {
+      apiFetch('/api/auth/profile', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ theme: next }),
+      }).catch(() => {});
+    }
   };
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
     setTimeout(() => setToast((curr) => (curr === msg ? null : curr)), 3200);
+  }, []);
+
+  // Verify active user session on boot
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!navigator.onLine) {
+        if (!cancelled) setAuthReady(true);
+        return;
+      }
+      try {
+        const res = await apiFetch('/api/auth/me');
+        const data = await res.json();
+        if (cancelled) return;
+        if (res.ok && data?.authenticated && data?.user) {
+          const u = data.user as AuthUser;
+          updateCachedAuthUser(u);
+          setAuthUser(u);
+          if (u.theme) {
+            setTheme(u.theme);
+            applyStudioTheme(u.theme);
+          }
+        } else {
+          clearAuthSession();
+          setAuthUser(null);
+          setGuestMode(isGuestModeEnabled());
+        }
+      } catch {
+        // Offline or unreachable — retain cached authUser for Offline Vault continuity
+      } finally {
+        if (!cancelled) setAuthReady(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const refreshVault = useCallback(
@@ -100,31 +170,51 @@ export function App() {
           );
         }
       } catch (err) {
+        if ((err as { code?: string })?.code === 'AUTH_REQUIRED') {
+          if (guestMode) {
+            resetToFreshGuestVault();
+            await clearAllOfflineStores().catch(() => {});
+            const retry = await syncVaultState(false).catch(() => null);
+            if (retry) {
+              setVault(retry.state);
+              return;
+            }
+          }
+          clearAuthSession();
+          setAuthUser(null);
+          setGuestMode(false);
+          setVault(null);
+          return;
+        }
         console.error('Vault sync error:', err);
       } finally {
         setIsSyncing(false);
       }
     },
-    [simulatedOffline, showToast]
+    [simulatedOffline, showToast, guestMode]
   );
 
   useEffect(() => {
+    if (!canLoadWorkspace) return;
     refreshVault();
-  }, [refreshVault]);
+  }, [canLoadWorkspace, refreshVault, authUser?.id]);
 
   useEffect(() => {
     const handleOnline = () => {
-      if (!simulatedOffline) {
+      if (!simulatedOffline && canLoadWorkspace) {
         refreshVault(false);
         showToast('Internet connected — Live Auto-Sync active');
       }
     };
     const handleOffline = () => {
       setIsOffline(true);
-      showToast('Offline Vault active — changes will auto-sync when online');
+      if (canLoadWorkspace) {
+        showToast('Offline Vault active — changes will auto-sync when online');
+      }
     };
     const handleFocusOrVisible = () => {
       if (
+        canLoadWorkspace &&
         !simulatedOffline &&
         navigator.onLine &&
         document.visibilityState === 'visible'
@@ -164,11 +254,11 @@ export function App() {
       window.removeEventListener('message', handleMessage);
       window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
     };
-  }, [refreshVault, simulatedOffline, showToast]);
+  }, [canLoadWorkspace, refreshVault, simulatedOffline, showToast]);
 
   // Live Background Auto-Sync loop whenever internet is available
   useEffect(() => {
-    if (simulatedOffline) return;
+    if (!canLoadWorkspace || simulatedOffline) return;
 
     const intervalMs = isOffline ? 8000 : 15000;
     const timer = window.setInterval(() => {
@@ -178,7 +268,7 @@ export function App() {
     }, intervalMs);
 
     return () => window.clearInterval(timer);
-  }, [simulatedOffline, isOffline, refreshVault]);
+  }, [canLoadWorkspace, simulatedOffline, isOffline, refreshVault]);
 
   const handleToggleOffline = async () => {
     const next = !simulatedOffline;
@@ -771,6 +861,78 @@ export function App() {
     setDeferredPrompt(null);
   };
 
+  const handleLogout = async () => {
+    try {
+      await apiFetch('/api/auth/logout', { method: 'POST' });
+    } catch {
+      // ignore if offline
+    }
+    clearAuthSession();
+    resetToFreshGuestVault();
+    await clearAllOfflineStores().catch(() => {});
+    setAuthUser(null);
+    setGuestMode(false);
+    setVault(null);
+    setCurrentFolderId(null);
+  };
+
+  const handleOpenAuthScreen = () => {
+    setGuestModeEnabled(false);
+    setGuestMode(false);
+  };
+
+  if (!authReady) {
+    return (
+      <div className="min-h-screen bg-canvas flex flex-col items-center justify-center gap-3.5">
+        <motion.div
+          animate={{ scale: [0.96, 1.04, 0.96] }}
+          transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut' }}
+          className="w-12 h-12 rounded-2xl bg-surface border border-line-strong flex items-center justify-center shadow-card"
+        >
+          <img
+            src="/cloudy-logo.png"
+            alt="Cloudy"
+            className="w-7 h-7 object-contain"
+          />
+        </motion.div>
+        <div className="text-xs font-medium text-ink-muted tracking-wide">
+          Cloudy · X-Kilo
+        </div>
+      </div>
+    );
+  }
+
+  if (!authUser && !guestMode) {
+    const existingVid =
+      typeof window !== 'undefined'
+        ? localStorage.getItem('cloudy_xkilo_vault_id')
+        : null;
+    return (
+      <AuthView
+        theme={theme}
+        onChangeTheme={handleChangeTheme}
+        hasExistingBrowserVault={Boolean(existingVid && existingVid !== 'default')}
+        onAuthenticated={(user, _token, mode) => {
+          setAuthUser(user);
+          setGuestMode(false);
+          if (user.theme) {
+            setTheme(user.theme);
+            applyStudioTheme(user.theme);
+          }
+          showToast(
+            mode === 'signup'
+              ? `Welcome to Cloudy, ${user.displayName}`
+              : `Signed in as ${user.displayName}`
+          );
+        }}
+        onContinueAsGuest={() => {
+          setGuestModeEnabled(true);
+          setGuestMode(true);
+        }}
+      />
+    );
+  }
+
   if (!vault) {
     return (
       <div className="min-h-screen bg-canvas flex flex-col items-center justify-center gap-3.5">
@@ -799,6 +961,9 @@ export function App() {
         onSelectTab={setActiveTab}
         onResetFolder={() => setCurrentFolderId(null)}
         vault={vault}
+        authUser={authUser}
+        onLogout={handleLogout}
+        onOpenAuthScreen={handleOpenAuthScreen}
         collapsed={sidebarCollapsed}
         onToggleCollapsed={() => setSidebarCollapsed((c) => !c)}
         theme={theme}
@@ -819,6 +984,9 @@ export function App() {
           pendingSyncCount={pendingSyncCount}
           theme={theme}
           onChangeTheme={handleChangeTheme}
+          authUser={authUser}
+          onOpenAccountTab={() => setActiveTab('database')}
+          onOpenAuthScreen={handleOpenAuthScreen}
         />
 
         {/* Smooth Page Transitions */}
@@ -856,6 +1024,16 @@ export function App() {
                   handleCreateNote(name, content, 'text/markdown', 'note', folderId)
                 }
               />
+            ) : activeTab === 'database' ? (
+              <DatabaseView
+                vault={vault}
+                authUser={authUser}
+                isOffline={isOffline}
+                onUserUpdated={(u) => setAuthUser(u)}
+                onLogout={handleLogout}
+                onOpenAuthScreen={handleOpenAuthScreen}
+                onShowToast={showToast}
+              />
             ) : activeTab === 'android' ? (
               <AndroidView
                 deferredPrompt={deferredPrompt}
@@ -890,6 +1068,7 @@ export function App() {
           { id: 'files' as NavTab, label: 'Files', icon: FolderClosed },
           { id: 'providers' as NavTab, label: 'Clouds', icon: Cloud },
           { id: 'ai-keys' as NavTab, label: 'AI API', icon: KeyRound },
+          { id: 'database' as NavTab, label: 'DB', icon: Database },
           { id: 'android' as NavTab, label: 'Android', icon: Smartphone },
         ].map((item) => {
           const Icon = item.icon;

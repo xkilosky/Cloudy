@@ -728,7 +728,8 @@ function resolveRequestOrigin(req) {
  * can read/write files 100% offline on 127.0.0.1:8765 AND auto-sync live whenever internet is available!
  */
 export async function streamOfflineAiBundleZip(req, res) {
-  const vaultId = req.query.vaultId || req.headers['x-cloudy-vault-id'] || 'default';
+  const vaultId =
+    req.authUser?.vault_id || req.query.vaultId || req.headers['x-cloudy-vault-id'] || 'default';
   const db = await ensureVaultLoaded(vaultId);
   const cloudOrigin = resolveRequestOrigin(req);
 
@@ -839,7 +840,8 @@ export async function streamOfflineAiBundleZip(req, res) {
 }
 
 export async function downloadOpenWebUiToolHandler(req, res) {
-  const vaultId = req.query.vaultId || req.headers['x-cloudy-vault-id'] || 'default';
+  const vaultId =
+    req.authUser?.vault_id || req.query.vaultId || req.headers['x-cloudy-vault-id'] || 'default';
   const db = await ensureVaultLoaded(vaultId);
   const cloudOrigin = resolveRequestOrigin(req);
 

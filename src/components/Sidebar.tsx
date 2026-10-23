@@ -4,21 +4,27 @@ import {
   FolderClosed,
   Cloud,
   KeyRound,
+  Database,
   Smartphone,
   PanelLeftClose,
   PanelLeftOpen,
+  LogOut,
+  LogIn,
 } from 'lucide-react';
-import type { VaultState } from '../types';
+import type { AuthUser, VaultState } from '../types';
 import { formatBytes } from '../lib/format';
 import { STUDIO_THEMES, type StudioTheme } from '../lib/theme';
 
-export type NavTab = 'files' | 'providers' | 'ai-keys' | 'android';
+export type NavTab = 'files' | 'providers' | 'ai-keys' | 'database' | 'android';
 
 interface SidebarProps {
   activeTab: NavTab;
   onSelectTab: (tab: NavTab) => void;
   onResetFolder: () => void;
   vault: VaultState;
+  authUser: AuthUser | null;
+  onLogout: () => void;
+  onOpenAuthScreen: () => void;
   collapsed: boolean;
   onToggleCollapsed: () => void;
   theme: StudioTheme;
@@ -29,6 +35,7 @@ const NAV_ITEMS: { id: NavTab; label: string; icon: React.ElementType }[] = [
   { id: 'files', label: 'Files & Carpetas', icon: FolderClosed },
   { id: 'providers', label: 'Cloud Pool', icon: Cloud },
   { id: 'ai-keys', label: 'Local AI API', icon: KeyRound },
+  { id: 'database', label: 'Database & Auth', icon: Database },
   { id: 'android', label: 'Android App', icon: Smartphone },
 ];
 
@@ -37,6 +44,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectTab,
   onResetFolder,
   vault,
+  authUser,
+  onLogout,
+  onOpenAuthScreen,
   collapsed,
   onToggleCollapsed,
   theme,
@@ -208,12 +218,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       {/* Storage Pool Capsule */}
       {!collapsed && (
-        <div className="p-3.5 pt-0">
+        <div className="px-3.5 pb-2.5">
           <motion.button
             whileHover={{ y: -1 }}
             whileTap={{ scale: 0.99 }}
             onClick={() => onSelectTab('providers')}
-            className="w-full p-3.5 rounded-2xl bg-surface/80 hover:bg-surface border border-line text-left space-y-2.5 shadow-card transition-colors"
+            className="w-full p-3.5 rounded-2xl bg-surface/80 hover:bg-surface border border-line text-left space-y-2 shadow-card transition-colors"
           >
             <div className="flex items-center justify-between text-xs">
               <span className="text-ink-secondary font-medium">Pooled Space</span>
@@ -238,6 +248,63 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </motion.button>
         </div>
       )}
+
+      {/* User Account Strip */}
+      <div className="p-3 border-t border-line">
+        {authUser ? (
+          <div
+            className={`flex items-center ${
+              collapsed ? 'justify-center' : 'justify-between gap-2'
+            }`}
+          >
+            <button
+              type="button"
+              onClick={() => onSelectTab('database')}
+              title={`${authUser.displayName} (${authUser.email})`}
+              className="flex items-center gap-2.5 min-w-0 text-left hover:opacity-90 transition-opacity"
+            >
+              <div
+                className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-semibold shrink-0 shadow-card"
+                style={{ backgroundColor: authUser.avatarColor || '#4D6BFE' }}
+              >
+                {(authUser.displayName || authUser.email).slice(0, 2).toUpperCase()}
+              </div>
+              {!collapsed && (
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-ink truncate">
+                    {authUser.displayName}
+                  </div>
+                  <div className="text-[11px] text-ink-muted truncate">
+                    {authUser.email}
+                  </div>
+                </div>
+              )}
+            </button>
+            {!collapsed && (
+              <button
+                type="button"
+                onClick={onLogout}
+                title="Sign out"
+                className="p-1.5 rounded-lg text-ink-muted hover:text-red-300 hover:bg-red-500/10 transition-colors shrink-0"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
+            )}
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={onOpenAuthScreen}
+            title="Sign in or create account"
+            className={`w-full py-2 px-3 rounded-xl bg-accent hover:bg-accent-hover text-white text-xs font-medium flex items-center ${
+              collapsed ? 'justify-center' : 'justify-center gap-2'
+            } transition-colors shadow-card`}
+          >
+            <LogIn className="w-3.5 h-3.5 shrink-0" />
+            {!collapsed && <span>Sign In / Sign Up</span>}
+          </button>
+        )}
+      </div>
     </motion.aside>
   );
 };

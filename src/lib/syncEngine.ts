@@ -150,8 +150,13 @@ async function runOnlineSyncCycle(): Promise<SyncVaultResult> {
         if (!resp || resp.ok || resp.status === 404) {
           await removeOfflineQueueItem(action.id);
           flushedQueueCount += 1;
-        } else if (resp.status >= 500 || resp.status === 408 || resp.status === 429) {
-          // Transient server or rate-limit error — keep safely queued for next live auto-sync tick
+        } else if (
+          resp.status >= 500 ||
+          resp.status === 408 ||
+          resp.status === 429 ||
+          resp.status === 401
+        ) {
+          // Transient server, rate-limit, or session-refresh error — keep safely queued
         } else {
           const body = await resp.json().catch(() => ({}));
           if (body?.code !== 'NO_CLOUD_ACCOUNT') {
@@ -164,6 +169,14 @@ async function runOnlineSyncCycle(): Promise<SyncVaultResult> {
     }
 
     const res = await apiFetch('/api/vault/state');
+    if (res.status === 401) {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('cloudy:auth-required'));
+      }
+      const authErr = new Error('AUTH_REQUIRED');
+      (authErr as Error & { code?: string }).code = 'AUTH_REQUIRED';
+      throw authErr;
+    }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = sanitizeOfflineSnapshot((await res.json()) as VaultState);
 
@@ -218,7 +231,10 @@ async function runOnlineSyncCycle(): Promise<SyncVaultResult> {
       flushedQueueCount,
       syncedAt: new Date().toISOString(),
     };
-  } catch {
+  } catch (err) {
+    if ((err as { code?: string })?.code === 'AUTH_REQUIRED') {
+      throw err;
+    }
     const fallback = await loadOfflineSnapshot();
     const queue = await getOfflineQueue();
     if (fallback) {
