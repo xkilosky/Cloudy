@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { motion } from 'framer-motion';
 import { Smartphone, Download, CheckCircle2 } from 'lucide-react';
 
 export interface BeforeInstallPromptEvent extends Event {
@@ -34,38 +35,45 @@ export const AndroidView: React.FC<AndroidViewProps> = ({
   }, []);
 
   return (
-    <div className="flex-1 px-5 sm:px-8 py-8">
+    <div className="flex-1 px-4 sm:px-8 py-7">
       <div className="max-w-4xl mx-auto space-y-8">
         <div>
-          <h1 className="text-xl font-bold text-white">Cloudy for Android</h1>
-          <p className="text-xs text-zinc-500 mt-1 font-mono">
-            com.xkilo.cloudy · Offline Vault Ready
+          <h1 className="text-xl font-semibold text-ink tracking-tight">
+            Cloudy for Android
+          </h1>
+          <p className="text-xs text-ink-muted mt-1 font-mono">
+            com.xkilo.cloudy · Offline Vault Enabled
           </p>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          {/* Card 1: Instant 1-Tap Android Install */}
-          <div className="rounded-2xl bg-[#07090C] border border-[#00F0FF]/30 p-6 flex flex-col justify-between gap-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+          {/* Instant WebAPK Card */}
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            whileHover={{ y: -2 }}
+            className="rounded-3xl bg-surface border border-line-strong p-6 flex flex-col justify-between gap-6 shadow-card"
+          >
             <div className="space-y-4">
               <div className="flex items-center justify-between">
-                <span className="text-[11px] font-mono uppercase tracking-wider text-[#00F0FF]">
+                <span className="text-[11px] font-medium px-2.5 py-0.5 rounded-full bg-accent-soft text-accent">
                   Instant WebAPK
                 </span>
-                <span className="text-[11px] text-zinc-400 inline-flex items-center gap-1">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-[#00F0FF]" />
+                <span className="text-[11px] text-[#10A37F] inline-flex items-center gap-1 font-medium">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
                   {swReady ? 'Offline Ready' : 'Active'}
                 </span>
               </div>
 
-              <h2 className="text-base font-bold text-white">
+              <h2 className="text-base font-semibold text-ink">
                 Install Directly on Android
               </h2>
-              <p className="text-xs text-zinc-400 leading-relaxed">
+              <p className="text-xs text-ink-secondary leading-relaxed">
                 Scan the QR code with your Android camera or open this URL in Chrome for Android to install Cloudy natively with full offline storage.
               </p>
 
               {qrSvg && (
-                <div className="p-3 rounded-2xl bg-black border border-white/[0.08] w-40 h-40 mx-auto flex items-center justify-center">
+                <div className="p-3.5 rounded-2xl bg-canvas border border-line w-40 h-40 mx-auto flex items-center justify-center shadow-card">
                   <div
                     className="w-full h-full [&>svg]:w-full [&>svg]:h-full"
                     dangerouslySetInnerHTML={{ __html: qrSvg }}
@@ -75,32 +83,42 @@ export const AndroidView: React.FC<AndroidViewProps> = ({
             </div>
 
             {deferredPrompt ? (
-              <button
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.97 }}
                 onClick={onTriggerPwaInstall}
-                className="w-full py-3 rounded-xl bg-[#00F0FF] hover:bg-[#33F3FF] text-black text-xs font-bold inline-flex items-center justify-center gap-2 transition"
+                className="w-full py-3 rounded-full bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center justify-center gap-2 shadow-glow transition"
               >
                 <Smartphone className="w-4 h-4" />
                 Install Cloudy App Now
-              </button>
+              </motion.button>
             ) : (
-              <div className="p-3 rounded-xl bg-black border border-white/[0.07] text-xs text-zinc-400 text-center">
-                On Android Chrome: tap <span className="text-white font-mono">⋮</span> →{' '}
-                <span className="text-[#00F0FF] font-semibold">Install app</span>
+              <div className="p-3.5 rounded-2xl bg-canvas border border-line text-xs text-ink-secondary text-center">
+                On Android Chrome: tap <span className="text-ink font-mono">⋮</span> →{' '}
+                <span className="text-accent font-semibold">Install app</span>
               </div>
             )}
-          </div>
+          </motion.div>
 
-          {/* Card 2: Native Android APK / Capacitor Project */}
-          <div className="rounded-2xl bg-[#07090C] border border-white/[0.08] p-6 flex flex-col justify-between gap-6">
+          {/* Native Android Project / APK Card */}
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.06 }}
+            whileHover={{ y: -2 }}
+            className="rounded-3xl bg-surface border border-line p-6 flex flex-col justify-between gap-6 shadow-card"
+          >
             <div className="space-y-3">
-              <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-500">
+              <span className="text-[11px] font-medium px-2.5 py-0.5 rounded-full bg-elevated text-ink-secondary">
                 Native Build
               </span>
-              <h2 className="text-base font-bold text-white">
+              <h2 className="text-base font-semibold text-ink">
                 Android Studio / APK Package
               </h2>
-              <p className="text-xs text-zinc-400 leading-relaxed">
-                Download the complete native Android Gradle project (<code className="text-zinc-200 font-mono">com.xkilo.cloudy</code>) with X-Kilo launcher icons and automated GitHub Actions <code className="text-zinc-200 font-mono">.apk</code> builder.
+              <p className="text-xs text-ink-secondary leading-relaxed">
+                Download the complete native Android Gradle project (
+                <code className="text-ink font-mono">com.xkilo.cloudy</code>) with X-Kilo launcher icons and automated GitHub Actions{' '}
+                <code className="text-ink font-mono">.apk</code> builder.
               </p>
             </div>
 
@@ -108,21 +126,23 @@ export const AndroidView: React.FC<AndroidViewProps> = ({
               {apkUrl && (
                 <a
                   href={apkUrl}
-                  className="w-full py-3 rounded-xl bg-[#00F0FF] text-black text-xs font-bold inline-flex items-center justify-center gap-2 transition"
+                  className="w-full py-3 rounded-full bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center justify-center gap-2 shadow-glow transition"
                 >
                   <Download className="w-4 h-4" />
                   Download Cloudy-X-Kilo.apk
                 </a>
               )}
-              <a
+              <motion.a
+                whileHover={{ y: -1 }}
+                whileTap={{ scale: 0.98 }}
                 href="/api/android/project.zip"
-                className="w-full py-3 rounded-xl bg-black hover:bg-white/[0.05] border border-white/15 text-white text-xs font-semibold inline-flex items-center justify-center gap-2 transition"
+                className="w-full py-3 rounded-full bg-elevated hover:bg-canvas border border-line-strong text-ink text-xs font-semibold inline-flex items-center justify-center gap-2 transition"
               >
-                <Download className="w-4 h-4 text-[#00F0FF]" />
+                <Download className="w-4 h-4 text-accent" />
                 Download Android APK Project (.zip)
-              </a>
+              </motion.a>
             </div>
-          </div>
+          </motion.div>
         </div>
       </div>
     </div>

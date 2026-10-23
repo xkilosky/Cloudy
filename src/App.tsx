@@ -1,9 +1,11 @@
 import React, { useEffect, useState, useCallback } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import {
   FolderClosed,
   Cloud,
   KeyRound,
   Smartphone,
+  CheckCircle2,
 } from 'lucide-react';
 import type {
   VaultState,
@@ -25,6 +27,11 @@ import {
 import { syncVaultState } from './lib/syncEngine';
 import { apiFetch } from './lib/vaultClient';
 import {
+  getSavedTheme,
+  applyStudioTheme,
+  type StudioTheme,
+} from './lib/theme';
+import {
   putStoreItem,
   saveOfflineBlob,
   getOfflineBlob,
@@ -33,6 +40,9 @@ import {
 
 export function App() {
   const [vault, setVault] = useState<VaultState | null>(null);
+  const [theme, setTheme] = useState<StudioTheme>(() => getSavedTheme());
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
   const [activeTab, setActiveTab] = useState<NavTab>(() => {
     const params = new URLSearchParams(window.location.search);
     const t = params.get('tab');
@@ -52,6 +62,15 @@ export function App() {
   const [swReady, setSwReady] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
+  useEffect(() => {
+    applyStudioTheme(theme);
+  }, [theme]);
+
+  const handleChangeTheme = (next: StudioTheme) => {
+    setTheme(next);
+    applyStudioTheme(next);
+  };
+
   const showToast = (msg: string) => {
     setToast(msg);
     setTimeout(() => setToast((curr) => (curr === msg ? null : curr)), 3200);
@@ -61,7 +80,9 @@ export function App() {
     async (forceOfflineOverride?: boolean) => {
       try {
         const useOffline =
-          forceOfflineOverride !== undefined ? forceOfflineOverride : simulatedOffline;
+          forceOfflineOverride !== undefined
+            ? forceOfflineOverride
+            : simulatedOffline;
         const res = await syncVaultState(useOffline);
         setVault(res.state);
         setIsOffline(res.isOffline);
@@ -81,12 +102,12 @@ export function App() {
     const handleOnline = () => {
       if (!simulatedOffline) {
         refreshVault(false);
-        showToast('Online — synced Offline Vault.');
+        showToast('Online — synced Offline Vault');
       }
     };
     const handleOffline = () => {
       setIsOffline(true);
-      showToast('Offline Vault active.');
+      showToast('Offline Vault active');
     };
     const handleMessage = (event: MessageEvent) => {
       if (event.data?.type === 'CLOUDY_OAUTH_SUCCESS') {
@@ -175,7 +196,8 @@ export function App() {
       for (const rawFile of arr) {
         const fid = `fil_${Math.random().toString(36).slice(2, 11)}`;
         const isTxt =
-          rawFile.type.startsWith('text/') || /\.(md|txt|json|csv)$/i.test(rawFile.name);
+          rawFile.type.startsWith('text/') ||
+          /\.(md|txt|json|csv)$/i.test(rawFile.name);
         const textContent = isTxt ? await rawFile.text() : null;
         const item: FileItem = {
           id: fid,
@@ -217,14 +239,17 @@ export function App() {
     for (const f of arr) fd.append('files', f);
     if (folderId) fd.append('folderId', folderId);
 
-    const res = await apiFetch('/api/files/upload', { method: 'POST', body: fd });
+    const res = await apiFetch('/api/files/upload', {
+      method: 'POST',
+      body: fd,
+    });
     const data = await res.json();
     if (!res.ok) {
       showToast(`Upload failed: ${data.error || 'Error'}`);
       return;
     }
     await refreshVault();
-    const dest = data.files?.[0]?.providerName || 'Storage';
+    const dest = data.files?.[0]?.providerName || 'Cloud';
     showToast(`Uploaded to ${dest}`);
   };
 
@@ -291,7 +316,9 @@ export function App() {
 
   const handleSaveFileContent = async (file: FileItem, updatedText: string) => {
     const now = new Date().toISOString();
-    const blob = new Blob([updatedText], { type: file.mimeType || 'text/plain' });
+    const blob = new Blob([updatedText], {
+      type: file.mimeType || 'text/plain',
+    });
 
     if (isOffline) {
       const updated: FileItem = {
@@ -325,7 +352,7 @@ export function App() {
       await saveOfflineBlob(file.id, blob, data.file.updatedAt);
       setPreviewFile(data.file);
       await refreshVault();
-      showToast('Saved');
+      showToast('Saved changes');
     }
   };
 
@@ -341,7 +368,9 @@ export function App() {
       return;
     }
     if (file.textContent != null) {
-      const b = new Blob([file.textContent], { type: file.mimeType || 'text/plain' });
+      const b = new Blob([file.textContent], {
+        type: file.mimeType || 'text/plain',
+      });
       const url = URL.createObjectURL(b);
       const a = document.createElement('a');
       a.href = url;
@@ -362,7 +391,10 @@ export function App() {
     }
   };
 
-  const handlePatchFile = async (fileId: string, body: Record<string, unknown>) => {
+  const handlePatchFile = async (
+    fileId: string,
+    body: Record<string, unknown>
+  ) => {
     if (isOffline) return;
     const res = await apiFetch(`/api/files/${fileId}`, {
       method: 'PATCH',
@@ -386,7 +418,10 @@ export function App() {
     await refreshVault();
   };
 
-  const handleTrashOrDeleteFolder = async (folder: FolderItem, permanent = false) => {
+  const handleTrashOrDeleteFolder = async (
+    folder: FolderItem,
+    permanent = false
+  ) => {
     if (isOffline) return;
     if (permanent) {
       await apiFetch(`/api/folders/${folder.id}`, { method: 'DELETE' });
@@ -401,7 +436,6 @@ export function App() {
     await refreshVault();
   };
 
-  // --- Real Cloud Account Connections ---
   const handleConnectCredentials = async (
     providerId: string,
     credentials: Record<string, string>
@@ -416,9 +450,7 @@ export function App() {
       throw new Error(data.error || 'Failed to verify storage credentials');
     }
     await refreshVault();
-    showToast(
-      `Connected ${data.account.accountLabel} (${data.importedFilesCount || 0} remote files synced)`
-    );
+    showToast(`Connected ${data.account.accountLabel}`);
   };
 
   const handleSyncAccount = async (accountId: string) => {
@@ -428,7 +460,7 @@ export function App() {
     const data = await res.json();
     if (res.ok) {
       await refreshVault();
-      showToast(`Synced ${data.importedCount || 0} new remote file(s)`);
+      showToast(`Synced ${data.importedCount || 0} remote file(s)`);
     }
   };
 
@@ -484,87 +516,113 @@ export function App() {
 
   if (!vault) {
     return (
-      <div className="min-h-screen bg-black flex flex-col items-center justify-center gap-3">
-        <img
-          src="/cloudy-logo.png"
-          alt="Cloudy"
-          className="w-12 h-12 object-contain"
-        />
-        <div className="text-xs font-mono text-zinc-500">CLOUDY · X-KILO</div>
+      <div className="min-h-screen bg-canvas flex flex-col items-center justify-center gap-3.5">
+        <motion.div
+          animate={{ scale: [0.96, 1.04, 0.96] }}
+          transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut' }}
+          className="w-12 h-12 rounded-2xl bg-surface border border-line-strong flex items-center justify-center shadow-card"
+        >
+          <img
+            src="/cloudy-logo.png"
+            alt="Cloudy"
+            className="w-7 h-7 object-contain"
+          />
+        </motion.div>
+        <div className="text-xs font-medium text-ink-muted tracking-wide">
+          Cloudy · X-Kilo
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen flex bg-black text-white">
+    <div className="min-h-screen flex bg-canvas ambient-canvas text-ink">
       <Sidebar
         activeTab={activeTab}
         onSelectTab={setActiveTab}
         onResetFolder={() => setCurrentFolderId(null)}
         vault={vault}
+        collapsed={sidebarCollapsed}
+        onToggleCollapsed={() => setSidebarCollapsed((c) => !c)}
+        theme={theme}
+        onChangeTheme={handleChangeTheme}
       />
 
-      <div className="flex-1 flex flex-col min-w-0 pb-20 lg:pb-0">
+      <div className="flex-1 flex flex-col min-w-0 pb-24 lg:pb-0">
         <TopBar
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
           isOffline={isOffline}
           onToggleOffline={handleToggleOffline}
           pendingSyncCount={pendingSyncCount}
+          theme={theme}
+          onChangeTheme={handleChangeTheme}
         />
 
-        {activeTab === 'providers' ? (
-          <ProvidersHub
-            vault={vault}
-            isOffline={isOffline}
-            onConnectCredentials={handleConnectCredentials}
-            onSyncAccount={handleSyncAccount}
-            onDisconnectAccount={handleDisconnectAccount}
-            onUpdateAllocationRule={handleUpdateRule}
-            onConnectedRefresh={async (label) => {
-              await refreshVault();
-              showToast(`Connected ${label || 'Cloud Storage'}`);
-            }}
-          />
-        ) : activeTab === 'ai-keys' ? (
-          <AiApiKeysView
-            vault={vault}
-            isOffline={isOffline}
-            onCreateKey={handleCreateAiKey}
-            onToggleKeyActive={handleToggleKeyActive}
-            onDeleteKey={handleDeleteKey}
-            onRefreshState={() => refreshVault()}
-          />
-        ) : activeTab === 'android' ? (
-          <AndroidView
-            deferredPrompt={deferredPrompt}
-            onTriggerPwaInstall={handleTriggerPwaInstall}
-            swReady={swReady}
-          />
-        ) : (
-          <DriveExplorer
-            vault={vault}
-            currentFolderId={currentFolderId}
-            onSelectFolder={setCurrentFolderId}
-            searchQuery={searchQuery}
-            isOffline={isOffline}
-            onUploadFiles={handleUploadFiles}
-            onCreateFolder={handleCreateFolder}
-            onCreateNote={handleCreateNote}
-            onOpenFile={setPreviewFile}
-            onDownloadFile={handleDownloadFile}
-            onTrashOrDeleteFile={handleTrashOrDeleteFile}
-            onRestoreFile={(f) => handlePatchFile(f.id, { trashed: false })}
-            onTrashOrDeleteFolder={handleTrashOrDeleteFolder}
-          />
-        )}
+        {/* Smooth Page Transitions */}
+        <AnimatePresence mode="wait">
+          <motion.main
+            key={activeTab}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+            className="flex-1 flex flex-col"
+          >
+            {activeTab === 'providers' ? (
+              <ProvidersHub
+                vault={vault}
+                isOffline={isOffline}
+                onConnectCredentials={handleConnectCredentials}
+                onSyncAccount={handleSyncAccount}
+                onDisconnectAccount={handleDisconnectAccount}
+                onUpdateAllocationRule={handleUpdateRule}
+                onConnectedRefresh={async (label) => {
+                  await refreshVault();
+                  showToast(`Connected ${label || 'Cloud Storage'}`);
+                }}
+              />
+            ) : activeTab === 'ai-keys' ? (
+              <AiApiKeysView
+                vault={vault}
+                isOffline={isOffline}
+                onCreateKey={handleCreateAiKey}
+                onToggleKeyActive={handleToggleKeyActive}
+                onDeleteKey={handleDeleteKey}
+                onRefreshState={() => refreshVault()}
+              />
+            ) : activeTab === 'android' ? (
+              <AndroidView
+                deferredPrompt={deferredPrompt}
+                onTriggerPwaInstall={handleTriggerPwaInstall}
+                swReady={swReady}
+              />
+            ) : (
+              <DriveExplorer
+                vault={vault}
+                currentFolderId={currentFolderId}
+                onSelectFolder={setCurrentFolderId}
+                searchQuery={searchQuery}
+                isOffline={isOffline}
+                onUploadFiles={handleUploadFiles}
+                onCreateFolder={handleCreateFolder}
+                onCreateNote={handleCreateNote}
+                onOpenFile={setPreviewFile}
+                onDownloadFile={handleDownloadFile}
+                onTrashOrDeleteFile={handleTrashOrDeleteFile}
+                onRestoreFile={(f) => handlePatchFile(f.id, { trashed: false })}
+                onTrashOrDeleteFolder={handleTrashOrDeleteFolder}
+              />
+            )}
+          </motion.main>
+        </AnimatePresence>
       </div>
 
-      {/* Minimalist OLED Mobile Bottom Nav */}
-      <nav className="fixed bottom-0 inset-x-0 z-30 lg:hidden bg-black/95 backdrop-blur-xl border-t border-white/[0.08] px-2 py-2 flex items-center justify-around">
+      {/* Floating Glass Mobile Dock with Gliding Pill */}
+      <nav className="fixed bottom-3 inset-x-4 z-30 lg:hidden rounded-full bg-surface/90 backdrop-blur-xl border border-line-strong px-2 py-1.5 flex items-center justify-around shadow-float">
         {[
           { id: 'files' as NavTab, label: 'Files', icon: FolderClosed },
-          { id: 'providers' as NavTab, label: 'Storage', icon: Cloud },
+          { id: 'providers' as NavTab, label: 'Clouds', icon: Cloud },
           { id: 'ai-keys' as NavTab, label: 'AI API', icon: KeyRound },
           { id: 'android' as NavTab, label: 'Android', icon: Smartphone },
         ].map((item) => {
@@ -574,12 +632,21 @@ export function App() {
             <button
               key={item.id}
               onClick={() => setActiveTab(item.id)}
-              className={`flex flex-col items-center gap-1 px-4 py-1 rounded-xl text-[11px] font-medium transition ${
-                active ? 'text-[#00F0FF]' : 'text-zinc-500'
+              className={`relative flex items-center gap-1.5 px-3.5 py-2 rounded-full text-xs font-medium transition-colors ${
+                active ? 'text-ink' : 'text-ink-muted hover:text-ink'
               }`}
             >
-              <Icon className="w-5 h-5" />
-              <span>{item.label}</span>
+              {active && (
+                <motion.span
+                  layoutId="mobileDockPill"
+                  transition={{ type: 'spring', stiffness: 450, damping: 32 }}
+                  className="absolute inset-0 rounded-full bg-elevated border border-line-strong"
+                />
+              )}
+              <Icon
+                className={`relative z-10 w-4 h-4 ${active ? 'text-accent' : ''}`}
+              />
+              {active && <span className="relative z-10">{item.label}</span>}
             </button>
           );
         })}
@@ -594,7 +661,7 @@ export function App() {
         onSaveContent={handleSaveFileContent}
         onMoveProvider={async (f, targetAccountId) => {
           await handlePatchFile(f.id, { targetAccountId });
-          showToast('Moved to selected storage account');
+          showToast('Moved to selected cloud');
         }}
         onMoveFolder={async (f, folderId) => {
           await handlePatchFile(f.id, { folderId });
@@ -602,11 +669,21 @@ export function App() {
         onDownload={handleDownloadFile}
       />
 
-      {toast && (
-        <div className="fixed bottom-20 lg:bottom-6 right-5 z-50 px-4 py-2.5 rounded-xl bg-[#07090C] border border-[#00F0FF]/40 text-xs font-medium text-[#00F0FF] shadow-2xl">
-          {toast}
-        </div>
-      )}
+      {/* Spring Toast Notification */}
+      <AnimatePresence>
+        {toast && (
+          <motion.div
+            initial={{ opacity: 0, y: 16, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 10, scale: 0.95 }}
+            transition={{ type: 'spring', stiffness: 450, damping: 30 }}
+            className="fixed bottom-20 lg:bottom-6 right-5 z-50 px-4 py-2.5 rounded-full bg-surface border border-line-strong text-xs font-medium text-ink shadow-float inline-flex items-center gap-2"
+          >
+            <CheckCircle2 className="w-4 h-4 text-[#10A37F]" />
+            <span>{toast}</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

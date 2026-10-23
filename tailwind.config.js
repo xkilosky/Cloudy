@@ -5,18 +5,31 @@ export default {
   theme: {
     extend: {
       colors: {
-        cloudy: {
-          50: '#eef8ff',
-          100: '#d8eeff',
-          200: '#b9e0ff',
-          300: '#89ceff',
-          400: '#52b4ff',
-          500: '#2994ff',
-          600: '#1273f5',
-          700: '#0b5ce1',
-          800: '#104bb6',
-          900: '#13418f',
-          950: '#060a14',
+        canvas: 'var(--bg-canvas)',
+        sidebar: 'var(--bg-sidebar)',
+        surface: 'var(--bg-surface)',
+        elevated: 'var(--bg-elevated)',
+        accent: {
+          DEFAULT: 'var(--accent)',
+          hover: 'var(--accent-hover)',
+          soft: 'var(--accent-soft)',
+          glow: 'var(--accent-glow)',
+          fg: 'var(--accent-fg)',
+        },
+        ink: {
+          DEFAULT: 'var(--text-primary)',
+          secondary: 'var(--text-secondary)',
+          muted: 'var(--text-muted)',
+        },
+        line: {
+          DEFAULT: 'var(--border-subtle)',
+          strong: 'var(--border-strong)',
+        },
+        ai: {
+          deepseek: '#4D6BFE',
+          claude: '#D97757',
+          chatgpt: '#10A37F',
+          qwen: '#7C5CFC',
         },
       },
       fontFamily: {
@@ -39,6 +52,11 @@ export default {
           'Consolas',
           'monospace',
         ],
+      },
+      boxShadow: {
+        card: '0 1px 2px rgba(0, 0, 0, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.04)',
+        float: '0 20px 50px -12px rgba(0, 0, 0, 0.55), 0 0 0 1px var(--border-strong)',
+        glow: '0 8px 28px -6px var(--accent-glow)',
       },
     },
   },

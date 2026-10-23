@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { motion } from 'framer-motion';
 import {
   Plus,
   Copy,
@@ -44,12 +45,16 @@ export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [snippetTab, setSnippetTab] = useState<'ollama' | 'curl'>('ollama');
 
-  const activeKeyObj = vault.apiKeys.find((k) => k.active) || vault.apiKeys[0] || null;
+  const activeKeyObj =
+    vault.apiKeys.find((k) => k.active) || vault.apiKeys[0] || null;
   const [testEndpoint, setTestEndpoint] = useState<string>('/api/v1/ai/files');
   const [testOutput, setTestOutput] = useState<string>('');
   const [testing, setTesting] = useState(false);
 
-  const origin = typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1:3000';
+  const origin =
+    typeof window !== 'undefined'
+      ? window.location.origin
+      : 'http://127.0.0.1:3000';
   const activeKeyToken = activeKeyObj?.key || 'cldy_sk_YOUR_KEY';
   const offlineZipHref = `/api/ai-keys/offline-bundle.zip?vaultId=${encodeURIComponent(getOrCreateVaultId())}`;
 
@@ -92,7 +97,7 @@ export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
             return;
           }
         } catch {
-          // IndexedDB direct fallback
+          // IndexedDB fallback
         }
         const snap = await loadOfflineSnapshot();
         setTestOutput(
@@ -123,7 +128,7 @@ export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
 
   const ollamaSnippet = `import json, urllib.request
 
-# Online (${origin}) OR Offline Server (http://127.0.0.1:8765)
+# Works online (${origin}) OR offline (http://127.0.0.1:8765)
 CLOUDY_URL = "${origin}"
 API_KEY = "${activeKeyToken}"
 
@@ -134,7 +139,6 @@ def cloudy(path):
     )
     return json.loads(urllib.request.urlopen(req).read().decode())
 
-# Search offline synced files & pass to local Ollama
 hits = cloudy("/api/v1/ai/search?q=Cloudy")["results"]
 context = "\\n\\n".join(
     cloudy(f"/api/v1/ai/files/{h['id']}/content")["content"]
@@ -152,42 +156,48 @@ req = urllib.request.Request(
 )
 print(json.loads(urllib.request.urlopen(req).read().decode())["response"])`;
 
-  const curlSnippet = `# List accessible carpetas (folders)
+  const curlSnippet = `# List accessible carpetas
 curl -s "${origin}/api/v1/ai/folders" -H "Authorization: Bearer ${activeKeyToken}"
 
 # Search offline files
 curl -s "${origin}/api/v1/ai/search?q=Cloudy" -H "Authorization: Bearer ${activeKeyToken}"
 
-# Read file text content
+# Read file content
 curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Bearer ${activeKeyToken}"`;
 
   const codeToDisplay = snippetTab === 'ollama' ? ollamaSnippet : curlSnippet;
 
   return (
-    <div className="flex-1 px-5 sm:px-8 py-8">
-      <div className="max-w-6xl mx-auto space-y-10">
-        {/* Top Row: Title + Offline Server Bundle Download */}
+    <div className="flex-1 px-4 sm:px-8 py-7">
+      <div className="max-w-5xl mx-auto space-y-9">
+        {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
-            <h1 className="text-xl font-bold text-white">Local AI API Keys</h1>
-            <p className="text-xs text-zinc-500 mt-1">
-              Scoped REST API keys so local offline models (Ollama, llama.cpp, Python) can read your files.
+            <h1 className="text-xl font-semibold text-ink tracking-tight">
+              Local AI API Keys
+            </h1>
+            <p className="text-xs text-ink-secondary mt-1">
+              Scoped REST keys so local models (Ollama, DeepSeek, Qwen, llama.cpp) can read your files online or offline.
             </p>
           </div>
 
-          <a
+          <motion.a
+            whileHover={{ y: -1 }}
+            whileTap={{ scale: 0.98 }}
             href={offlineZipHref}
-            className="px-4 py-2.5 rounded-xl bg-[#07090C] hover:bg-white/[0.05] border border-[#00F0FF]/40 text-[#00F0FF] text-xs font-bold inline-flex items-center gap-2 transition w-fit"
+            className="px-4 py-2.5 rounded-full bg-surface hover:bg-elevated border border-line-strong text-ink text-xs font-medium inline-flex items-center gap-2 shadow-card transition w-fit"
           >
-            <Download className="w-4 h-4" />
-            Download Offline AI Server (.zip)
-          </a>
+            <Download className="w-4 h-4 text-accent" />
+            Offline AI Server (.zip)
+          </motion.a>
         </div>
 
-        {/* Clean Single-Bar Create Key Form */}
-        <form
+        {/* Create Key Composer Bar */}
+        <motion.form
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
           onSubmit={handleCreate}
-          className="rounded-2xl bg-[#07090C] border border-white/[0.08] p-4 flex flex-col md:flex-row items-stretch md:items-center gap-3"
+          className="rounded-3xl bg-surface border border-line-strong p-3.5 shadow-card flex flex-col md:flex-row items-stretch md:items-center gap-2.5"
         >
           <input
             type="text"
@@ -195,14 +205,14 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
             disabled={isOffline}
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="New key name (e.g. Ollama Local)"
-            className="flex-1 px-3.5 py-2 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs text-white"
+            placeholder="Key label (e.g. Ollama / Qwen Local)"
+            className="flex-1 px-4 py-2.5 rounded-2xl bg-canvas border border-line focus:border-accent focus:ring-4 focus:ring-accent-soft focus:outline-none text-xs text-ink placeholder:text-ink-muted transition-all"
           />
 
           <select
             value={scope}
             onChange={(e) => setScope(e.target.value as 'read' | 'read_write')}
-            className="px-3 py-2 rounded-xl bg-black border border-white/10 text-xs text-white"
+            className="px-3.5 py-2.5 rounded-2xl bg-canvas border border-line text-xs text-ink focus:outline-none"
           >
             <option value="read">Read Only</option>
             <option value="read_write">Read & Write</option>
@@ -211,7 +221,7 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
           <select
             value={folderRestriction}
             onChange={(e) => setFolderRestriction(e.target.value)}
-            className="px-3 py-2 rounded-xl bg-black border border-white/10 text-xs text-white"
+            className="px-3.5 py-2.5 rounded-2xl bg-canvas border border-line text-xs text-ink focus:outline-none"
           >
             <option value="all">All Carpetas</option>
             {vault.folders
@@ -223,48 +233,53 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
               ))}
           </select>
 
-          <button
+          <motion.button
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.97 }}
             type="submit"
             disabled={creating || isOffline}
-            className="px-4 py-2 rounded-xl bg-[#00F0FF] hover:bg-[#33F3FF] text-black text-xs font-bold inline-flex items-center justify-center gap-1.5 transition shrink-0 disabled:opacity-40"
+            className="px-5 py-2.5 rounded-full bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center justify-center gap-1.5 shadow-glow transition shrink-0 disabled:opacity-40"
           >
             <Plus className="w-3.5 h-3.5" />
             {creating ? 'Creating...' : 'Create Key'}
-          </button>
-        </form>
+          </motion.button>
+        </motion.form>
 
         {/* Active Keys */}
         <section className="space-y-3">
-          <h2 className="text-[11px] font-medium uppercase tracking-widest text-zinc-500">
+          <h2 className="text-[11px] font-medium uppercase tracking-wider text-ink-muted px-0.5">
             Active Keys
           </h2>
-          <div className="rounded-2xl border border-white/[0.08] bg-[#07090C] divide-y divide-white/[0.06] overflow-hidden">
+          <div className="rounded-2xl border border-line bg-surface shadow-card divide-y divide-line overflow-hidden">
             {vault.apiKeys.map((k) => {
               const revealed = Boolean(revealedIds[k.id]);
               return (
                 <div
                   key={k.id}
-                  className="p-4 sm:px-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                  className="p-4 sm:px-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-elevated/40 transition-colors"
                 >
                   <div className="min-w-0 space-y-1">
                     <div className="flex items-center gap-2.5">
-                      <span className="text-sm font-semibold text-white">{k.name}</span>
-                      <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-white/[0.05] text-zinc-300">
+                      <span className="text-sm font-semibold text-ink">
+                        {k.name}
+                      </span>
+                      <span className="text-[10px] font-mono px-2.5 py-0.5 rounded-full bg-elevated text-ink-secondary">
                         {k.scope}
                       </span>
                       {!k.active && (
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-red-500/15 text-red-300">
+                        <span className="text-[10px] font-mono px-2.5 py-0.5 rounded-full bg-red-500/15 text-red-300">
                           paused
                         </span>
                       )}
                     </div>
-                    <div className="text-[11px] text-zinc-500">
-                      {k.usageCount} requests · Last used {formatRelativeTime(k.lastUsedAt)}
+                    <div className="text-[11px] text-ink-muted">
+                      {k.usageCount} requests · Last used{' '}
+                      {formatRelativeTime(k.lastUsedAt)}
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2">
-                    <code className="px-3 py-1.5 rounded-xl bg-black border border-white/[0.08] text-xs font-mono text-[#00F0FF] max-w-[230px] truncate">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <code className="px-3.5 py-1.5 rounded-xl bg-canvas border border-line text-xs font-mono text-accent max-w-[230px] truncate">
                       {revealed ? k.key : k.keyPrefix}
                     </code>
 
@@ -272,8 +287,7 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
                       onClick={() =>
                         setRevealedIds((p) => ({ ...p, [k.id]: !revealed }))
                       }
-                      className="p-2 rounded-lg text-zinc-500 hover:text-white"
-                      title={revealed ? 'Hide' : 'Reveal'}
+                      className="p-2 rounded-xl text-ink-muted hover:text-ink hover:bg-elevated transition"
                     >
                       {revealed ? (
                         <EyeOff className="w-4 h-4" />
@@ -284,7 +298,7 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
 
                     <button
                       onClick={() => copyText(k.id, k.key)}
-                      className="px-3 py-1.5 rounded-xl bg-[#00F0FF]/10 hover:bg-[#00F0FF] text-[#00F0FF] hover:text-black border border-[#00F0FF]/30 text-xs font-bold inline-flex items-center gap-1 transition"
+                      className="px-3.5 py-1.5 rounded-full bg-accent-soft hover:bg-accent text-accent hover:text-accent-fg text-xs font-semibold inline-flex items-center gap-1 transition"
                     >
                       {copiedId === k.id ? (
                         <>
@@ -300,7 +314,7 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
                     <button
                       disabled={isOffline}
                       onClick={() => onToggleKeyActive(k)}
-                      className="px-2.5 py-1.5 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] text-xs text-zinc-300"
+                      className="px-3 py-1.5 rounded-full bg-elevated hover:bg-canvas text-xs text-ink-secondary hover:text-ink transition"
                     >
                       {k.active ? 'Pause' : 'Enable'}
                     </button>
@@ -309,7 +323,7 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
                       <button
                         disabled={isOffline}
                         onClick={() => onDeleteKey(k.id)}
-                        className="p-2 rounded-lg text-zinc-500 hover:text-red-400"
+                        className="p-2 rounded-xl text-ink-muted hover:text-red-400 hover:bg-elevated transition"
                       >
                         <Trash2 className="w-4 h-4" />
                       </button>
@@ -321,36 +335,39 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
           </div>
         </section>
 
-        {/* Code Snippets + Clean Live Tester */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          <div className="lg:col-span-7 rounded-2xl bg-[#07090C] border border-white/[0.08] p-5 space-y-4">
+        {/* Code Snippets + Live Endpoint Runner */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+          <div className="lg:col-span-7 rounded-3xl bg-surface border border-line p-5 space-y-4 shadow-card">
             <div className="flex items-center justify-between">
-              <div className="inline-flex bg-black border border-white/[0.08] rounded-xl p-1 text-xs">
-                <button
-                  onClick={() => setSnippetTab('ollama')}
-                  className={`px-3 py-1 rounded-lg font-medium transition ${
-                    snippetTab === 'ollama'
-                      ? 'bg-[#00F0FF] text-black font-semibold'
-                      : 'text-zinc-400 hover:text-white'
-                  }`}
-                >
-                  Python + Ollama
-                </button>
-                <button
-                  onClick={() => setSnippetTab('curl')}
-                  className={`px-3 py-1 rounded-lg font-medium transition ${
-                    snippetTab === 'curl'
-                      ? 'bg-[#00F0FF] text-black font-semibold'
-                      : 'text-zinc-400 hover:text-white'
-                  }`}
-                >
-                  cURL REST
-                </button>
+              <div className="inline-flex bg-canvas border border-line rounded-full p-1 text-xs">
+                {(['ollama', 'curl'] as const).map((tab) => {
+                  const active = snippetTab === tab;
+                  return (
+                    <button
+                      key={tab}
+                      onClick={() => setSnippetTab(tab)}
+                      className={`relative px-3.5 py-1.5 rounded-full font-medium transition-colors ${
+                        active ? 'text-accent-fg' : 'text-ink-secondary hover:text-ink'
+                      }`}
+                    >
+                      {active && (
+                        <motion.span
+                          layoutId="aiSnippetTab"
+                          transition={{ type: 'spring', stiffness: 450, damping: 32 }}
+                          className="absolute inset-0 rounded-full bg-accent shadow-glow"
+                        />
+                      )}
+                      <span className="relative z-10">
+                        {tab === 'ollama' ? 'Python + Local LLM' : 'cURL REST'}
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
 
               <button
                 onClick={() => copyText('snippet', codeToDisplay)}
-                className="text-xs text-[#00F0FF] hover:underline inline-flex items-center gap-1 font-medium"
+                className="text-xs text-accent hover:underline inline-flex items-center gap-1 font-medium"
               >
                 {copiedId === 'snippet' ? (
                   <>
@@ -358,44 +375,50 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
                   </>
                 ) : (
                   <>
-                    <Copy className="w-3.5 h-3.5" /> Copy Snippet
+                    <Copy className="w-3.5 h-3.5" /> Copy
                   </>
                 )}
               </button>
             </div>
 
-            <pre className="p-4 rounded-xl bg-black border border-white/[0.06] text-xs font-mono text-zinc-200 overflow-x-auto leading-relaxed">
+            <pre className="p-4 rounded-2xl bg-canvas border border-line text-xs font-mono text-ink overflow-x-auto leading-relaxed">
               {codeToDisplay}
             </pre>
           </div>
 
-          <div className="lg:col-span-5 rounded-2xl bg-[#07090C] border border-white/[0.08] p-5 space-y-4">
-            <div className="text-xs font-medium text-zinc-400">Test Endpoint</div>
+          <div className="lg:col-span-5 rounded-3xl bg-surface border border-line p-5 space-y-4 shadow-card">
+            <div className="text-xs font-medium text-ink-secondary">
+              Interactive Endpoint Tester
+            </div>
             <div className="flex gap-2">
               <select
                 value={testEndpoint}
                 onChange={(e) => setTestEndpoint(e.target.value)}
-                className="flex-1 px-3 py-2 rounded-xl bg-black border border-white/10 text-xs font-mono text-white"
+                className="flex-1 px-3.5 py-2 rounded-2xl bg-canvas border border-line text-xs font-mono text-ink focus:outline-none"
               >
                 <option value="/api/v1/ai/status">GET /api/v1/ai/status</option>
                 <option value="/api/v1/ai/folders">GET /api/v1/ai/folders</option>
                 <option value="/api/v1/ai/files">GET /api/v1/ai/files</option>
-                <option value="/api/v1/ai/search?q=Cloudy">GET /api/v1/ai/search?q=Cloudy</option>
+                <option value="/api/v1/ai/search?q=Cloudy">
+                  GET /api/v1/ai/search?q=Cloudy
+                </option>
                 <option value="/api/v1/ai/files/fil_welcome/content">
                   GET /api/v1/ai/files/fil_welcome/content
                 </option>
               </select>
-              <button
+              <motion.button
+                whileHover={{ scale: 1.03 }}
+                whileTap={{ scale: 0.96 }}
                 onClick={runLiveTest}
                 disabled={testing || !activeKeyObj}
-                className="px-4 py-2 rounded-xl bg-[#00F0FF] text-black font-bold text-xs inline-flex items-center gap-1.5"
+                className="px-4 py-2 rounded-full bg-accent hover:bg-accent-hover text-accent-fg font-semibold text-xs inline-flex items-center gap-1.5 shadow-glow transition"
               >
                 <Play className="w-3.5 h-3.5" />
                 Run
-              </button>
+              </motion.button>
             </div>
 
-            <pre className="p-4 rounded-xl bg-black border border-white/[0.06] text-[11px] font-mono text-[#00F0FF] h-52 overflow-auto">
+            <pre className="p-4 rounded-2xl bg-canvas border border-line text-[11px] font-mono text-ink-secondary h-52 overflow-auto">
               {testOutput || '// Click Run to inspect live JSON response'}
             </pre>
           </div>

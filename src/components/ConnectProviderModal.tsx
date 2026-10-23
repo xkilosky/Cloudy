@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import {
   X,
   ExternalLink,
@@ -36,27 +37,22 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [copiedCode, setCopiedCode] = useState(false);
 
-  // Email + Password (MEGA 20 GB, pCloud 10 GB, Koofr 10 GB, Yandex 5 GB)
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showMfa, setShowMfa] = useState(false);
   const [mfaCode, setMfaCode] = useState('');
 
-  // 1-Click Device Flow state (GitHub & Microsoft OneDrive — zero tokens!)
   const [deviceFlow, setDeviceFlow] = useState<{
     userCode: string;
     verificationUri: string;
   } | null>(null);
 
-  // Nextcloud 1-Click Browser Login Flow v2
   const [ncServerUrl, setNcServerUrl] = useState('https://cloud.tab.digital');
   const [ncCustom, setNcCustom] = useState(false);
   const [ncPolling, setNcPolling] = useState(false);
 
-  // Google Drive / Dropbox / Box simple token
   const [smartPayload, setSmartPayload] = useState('');
 
-  // S3 & Supabase
   const [s3Endpoint, setS3Endpoint] = useState('');
   const [s3Bucket, setS3Bucket] = useState('');
   const [s3AccessKey, setS3AccessKey] = useState('');
@@ -83,13 +79,11 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
     if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
   }, [provider]);
 
-  if (!provider) return null;
-
   const isDeviceFlowProvider =
-    provider.id === 'github_vault' || provider.id === 'onedrive';
+    provider?.id === 'github_vault' || provider?.id === 'onedrive';
 
-  // --- 1-CLICK SIGN IN FOR GITHUB & MICROSOFT ONEDRIVE (ZERO TYPING!) ---
   const handleStartDeviceSignIn = async () => {
+    if (!provider) return;
     setErrorMsg(null);
     setLoading(true);
     try {
@@ -109,7 +103,7 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
         setCopiedCode(true);
         setTimeout(() => setCopiedCode(false), 3000);
       } catch {
-        // ignore clipboard denial
+        // ignore
       }
 
       const width = 520;
@@ -141,7 +135,7 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
             onClose();
           }
         } catch {
-          // keep polling while user approves in popup
+          // keep polling
         }
       }, pollMs);
     } catch (err: unknown) {
@@ -150,7 +144,6 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
     }
   };
 
-  // --- 1-CLICK SIGN IN FOR NEXTCLOUD (ZERO TYPING!) ---
   const handleStartNextcloudFlow = async () => {
     setErrorMsg(null);
     setLoading(true);
@@ -205,9 +198,9 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
     }
   };
 
-  // --- SUBMIT EMAIL+PASSWORD OR TOKEN ---
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!provider) return;
     setErrorMsg(null);
     setLoading(true);
     try {
@@ -261,6 +254,7 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
   };
 
   const launchSavedOAuthPopup = () => {
+    if (!provider) return;
     const qs = new URLSearchParams({ vaultId: getOrCreateVaultId() });
     const width = 520;
     const height = 660;
@@ -274,338 +268,380 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
     onClose();
   };
 
+  const inputCls =
+    'w-full px-4 py-2.5 rounded-2xl bg-canvas border border-line-strong focus:border-accent focus:ring-4 focus:ring-accent-soft focus:outline-none text-xs text-ink placeholder:text-ink-muted transition-all';
+
   return (
-    <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4">
-      <div className="w-full max-w-sm rounded-2xl bg-[#07090C] border border-white/10 p-6 space-y-5 shadow-2xl">
-        {/* Clean Minimalist Header */}
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <div className="text-[11px] font-mono text-[#00F0FF] uppercase tracking-wider flex items-center gap-1">
-              <Zap className="w-3 h-3" /> {provider.freeLabel}
-            </div>
-            <h3 className="text-base font-bold text-white mt-0.5">
-              {provider.name}
-            </h3>
-          </div>
-          <button
-            onClick={onClose}
-            className="p-1 text-zinc-500 hover:text-white transition"
+    <AnimatePresence>
+      {provider && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          onClick={onClose}
+          className="fixed inset-0 z-50 bg-black/65 backdrop-blur-md flex items-center justify-center p-4"
+        >
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95, y: 12 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.96, y: 10 }}
+            transition={{ type: 'spring', stiffness: 420, damping: 30 }}
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm rounded-3xl bg-surface border border-line-strong p-6 space-y-5 shadow-float"
           >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        {errorMsg && (
-          <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-xs text-red-300 flex items-start gap-2">
-            <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
-            <span className="break-words">{errorMsg}</span>
-          </div>
-        )}
-
-        {/* === 1. ONE-CLICK POPUP SIGN-IN (GitHub & Microsoft OneDrive — ZERO INPUTS!) === */}
-        {isDeviceFlowProvider && (
-          <div className="space-y-4">
-            {!deviceFlow ? (
+            {/* Header */}
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-[11px] font-medium text-accent inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-accent-soft">
+                  <Zap className="w-3 h-3" /> {provider.freeLabel}
+                </div>
+                <h3 className="text-base font-semibold text-ink mt-2">
+                  Connect {provider.name}
+                </h3>
+              </div>
               <button
-                type="button"
-                disabled={loading}
-                onClick={handleStartDeviceSignIn}
-                className="w-full py-3 rounded-xl bg-[#00F0FF] hover:bg-[#33F3FF] text-black text-xs font-bold inline-flex items-center justify-center gap-2 transition"
+                onClick={onClose}
+                className="p-1.5 rounded-full text-ink-muted hover:text-ink hover:bg-elevated transition"
               >
-                {loading && <Loader2 className="w-4 h-4 animate-spin" />}
-                Sign in with {provider.name}
+                <X className="w-4 h-4" />
               </button>
-            ) : (
-              <div className="p-4 rounded-xl bg-black border border-[#00F0FF]/40 text-center space-y-3">
-                <div className="text-[11px] text-zinc-400">
-                  Enter this code in the popup (already copied):
-                </div>
-                <div className="flex items-center justify-center gap-2">
-                  <span className="text-2xl font-mono font-bold tracking-widest text-[#00F0FF]">
-                    {deviceFlow.userCode}
-                  </span>
-                  <button
+            </div>
+
+            {errorMsg && (
+              <motion.div
+                initial={{ opacity: 0, y: -4 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="p-3 rounded-2xl bg-red-500/10 border border-red-500/30 text-xs text-red-300 flex items-start gap-2"
+              >
+                <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                <span className="break-words">{errorMsg}</span>
+              </motion.div>
+            )}
+
+            {/* 1. One-Click Device Flow (GitHub & Microsoft OneDrive) */}
+            {isDeviceFlowProvider && (
+              <div className="space-y-4">
+                {!deviceFlow ? (
+                  <motion.button
+                    whileHover={{ y: -1 }}
+                    whileTap={{ scale: 0.98 }}
                     type="button"
-                    onClick={() => {
-                      navigator.clipboard.writeText(deviceFlow.userCode);
-                      setCopiedCode(true);
-                      setTimeout(() => setCopiedCode(false), 2000);
-                    }}
-                    className="p-1.5 rounded-lg bg-white/[0.06] text-zinc-300 hover:text-white"
+                    disabled={loading}
+                    onClick={handleStartDeviceSignIn}
+                    className="w-full py-3 rounded-full bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center justify-center gap-2 shadow-glow transition"
                   >
-                    {copiedCode ? (
-                      <Check className="w-4 h-4 text-[#00F0FF]" />
-                    ) : (
-                      <Copy className="w-4 h-4" />
-                    )}
-                  </button>
-                </div>
-                <div className="flex items-center justify-center gap-2 text-xs text-zinc-400 pt-1">
-                  <Loader2 className="w-3.5 h-3.5 animate-spin text-[#00F0FF]" />
-                  <span>Waiting for approval...</span>
-                </div>
-                <a
-                  href={deviceFlow.verificationUri}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-[11px] text-[#00F0FF] hover:underline inline-flex items-center gap-1"
-                >
-                  Re-open login window <ExternalLink className="w-3 h-3" />
-                </a>
+                    {loading && <Loader2 className="w-4 h-4 animate-spin" />}
+                    Sign in with {provider.name}
+                  </motion.button>
+                ) : (
+                  <motion.div
+                    initial={{ opacity: 0, scale: 0.97 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    className="p-4 rounded-2xl bg-canvas border border-line-strong text-center space-y-3"
+                  >
+                    <div className="text-[11px] text-ink-secondary">
+                      Enter code in popup (already copied):
+                    </div>
+                    <div className="flex items-center justify-center gap-2">
+                      <span className="text-2xl font-mono font-bold tracking-widest text-accent">
+                        {deviceFlow.userCode}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText(deviceFlow.userCode);
+                          setCopiedCode(true);
+                          setTimeout(() => setCopiedCode(false), 2000);
+                        }}
+                        className="p-1.5 rounded-xl bg-surface text-ink-secondary hover:text-ink"
+                      >
+                        {copiedCode ? (
+                          <Check className="w-4 h-4 text-[#10A37F]" />
+                        ) : (
+                          <Copy className="w-4 h-4" />
+                        )}
+                      </button>
+                    </div>
+                    <div className="flex items-center justify-center gap-2 text-xs text-ink-secondary pt-1">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-accent" />
+                      <span>Waiting for approval...</span>
+                    </div>
+                    <a
+                      href={deviceFlow.verificationUri}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-[11px] text-accent hover:underline inline-flex items-center gap-1"
+                    >
+                      Re-open login window <ExternalLink className="w-3 h-3" />
+                    </a>
+                  </motion.div>
+                )}
               </div>
             )}
-          </div>
-        )}
 
-        {/* === 2. TWO-FIELD EMAIL + PASSWORD SIGN-IN (MEGA 20 GB, pCloud 10 GB, Koofr, Yandex) === */}
-        {(provider.authMode === 'mega' ||
-          provider.authMode === 'pcloud' ||
-          provider.authMode === 'webdav') && (
-          <form onSubmit={handleSubmit} className="space-y-3">
-            <input
-              type="text"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="Email"
-              className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs text-white"
-            />
-            <input
-              type="password"
-              required
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder={
-                provider.authMode === 'webdav' ? 'App Password' : 'Password'
-              }
-              className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs text-white"
-            />
+            {/* 2. Two-Field Email + Password (MEGA, pCloud, Koofr, Yandex) */}
+            {(provider.authMode === 'mega' ||
+              provider.authMode === 'pcloud' ||
+              provider.authMode === 'webdav') && (
+              <form onSubmit={handleSubmit} className="space-y-3">
+                <input
+                  type="text"
+                  required
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="Email address"
+                  className={inputCls}
+                />
+                <input
+                  type="password"
+                  required
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder={
+                    provider.authMode === 'webdav' ? 'App Password' : 'Password'
+                  }
+                  className={inputCls}
+                />
 
-            {showMfa && (
-              <input
-                type="text"
-                value={mfaCode}
-                onChange={(e) => setMfaCode(e.target.value)}
-                placeholder="2FA Code"
-                className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
-              />
+                {showMfa && (
+                  <input
+                    type="text"
+                    value={mfaCode}
+                    onChange={(e) => setMfaCode(e.target.value)}
+                    placeholder="2FA Code"
+                    className={`${inputCls} font-mono`}
+                  />
+                )}
+
+                <motion.button
+                  whileHover={{ y: -1 }}
+                  whileTap={{ scale: 0.98 }}
+                  type="submit"
+                  disabled={loading}
+                  className="w-full py-3 rounded-full bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center justify-center gap-2 shadow-glow transition"
+                >
+                  {loading && <Loader2 className="w-4 h-4 animate-spin" />}
+                  {loading ? 'Signing in...' : `Sign In · ${provider.freeLabel}`}
+                </motion.button>
+
+                {provider.authMode === 'webdav' && provider.consoleUrl && (
+                  <a
+                    href={provider.consoleUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="block text-center text-[11px] text-ink-muted hover:text-accent transition"
+                  >
+                    Get {provider.name} App Password →
+                  </a>
+                )}
+              </form>
             )}
 
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full py-3 rounded-xl bg-[#00F0FF] hover:bg-[#33F3FF] text-black text-xs font-bold inline-flex items-center justify-center gap-2 transition"
-            >
-              {loading && <Loader2 className="w-4 h-4 animate-spin" />}
-              {loading ? 'Signing in...' : `Sign In (${provider.freeLabel})`}
-            </button>
-
-            {provider.authMode === 'webdav' && provider.consoleUrl && (
-              <a
-                href={provider.consoleUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="block text-center text-[11px] text-zinc-400 hover:text-[#00F0FF] transition"
-              >
-                Get {provider.name} App Password →
-              </a>
-            )}
-          </form>
-        )}
-
-        {/* === 3. ONE-CLICK NEXTCLOUD SIGN-IN === */}
-        {provider.authMode === 'nextcloud' && (
-          <div className="space-y-3.5">
-            <div className="flex flex-wrap gap-1.5">
-              {NEXTCLOUD_PRESETS.map((p) => {
-                const active = !ncCustom && ncServerUrl === p.url;
-                return (
+            {/* 3. Nextcloud 1-Click Browser Login */}
+            {provider.authMode === 'nextcloud' && (
+              <div className="space-y-3.5">
+                <div className="flex flex-wrap gap-1.5">
+                  {NEXTCLOUD_PRESETS.map((p) => {
+                    const active = !ncCustom && ncServerUrl === p.url;
+                    return (
+                      <button
+                        key={p.url}
+                        type="button"
+                        onClick={() => {
+                          setNcCustom(false);
+                          setNcServerUrl(p.url);
+                        }}
+                        className={`px-3 py-1.5 rounded-full text-xs font-medium border transition ${
+                          active
+                            ? 'bg-accent-soft border-accent/50 text-accent'
+                            : 'bg-canvas border-line text-ink-secondary hover:text-ink'
+                        }`}
+                      >
+                        {p.label}
+                      </button>
+                    );
+                  })}
                   <button
-                    key={p.url}
                     type="button"
-                    onClick={() => {
-                      setNcCustom(false);
-                      setNcServerUrl(p.url);
-                    }}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-medium border transition ${
-                      active
-                        ? 'bg-[#00F0FF]/15 border-[#00F0FF] text-[#00F0FF]'
-                        : 'bg-black border-white/10 text-zinc-400 hover:text-white'
+                    onClick={() => setNcCustom(true)}
+                    className={`px-3 py-1.5 rounded-full text-xs font-medium border transition ${
+                      ncCustom
+                        ? 'bg-accent-soft border-accent/50 text-accent'
+                        : 'bg-canvas border-line text-ink-secondary hover:text-ink'
                     }`}
                   >
-                    {p.label}
+                    Custom
                   </button>
-                );
-              })}
-              <button
-                type="button"
-                onClick={() => setNcCustom(true)}
-                className={`px-3 py-1.5 rounded-xl text-xs font-medium border transition ${
-                  ncCustom
-                    ? 'bg-[#00F0FF]/15 border-[#00F0FF] text-[#00F0FF]'
-                    : 'bg-black border-white/10 text-zinc-400 hover:text-white'
-                }`}
-              >
-                Custom
-              </button>
-            </div>
+                </div>
 
-            {ncCustom && (
-              <input
-                type="text"
-                value={ncServerUrl}
-                onChange={(e) => setNcServerUrl(e.target.value)}
-                placeholder="https://your-nextcloud-server.com"
-                className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
-              />
-            )}
+                {ncCustom && (
+                  <input
+                    type="text"
+                    value={ncServerUrl}
+                    onChange={(e) => setNcServerUrl(e.target.value)}
+                    placeholder="https://your-nextcloud-server.com"
+                    className={`${inputCls} font-mono`}
+                  />
+                )}
 
-            <button
-              type="button"
-              disabled={loading || ncPolling}
-              onClick={handleStartNextcloudFlow}
-              className="w-full py-3 rounded-xl bg-[#00F0FF] hover:bg-[#33F3FF] text-black text-xs font-bold inline-flex items-center justify-center gap-2 transition"
-            >
-              {(loading || ncPolling) && <Loader2 className="w-4 h-4 animate-spin" />}
-              {ncPolling ? 'Click "Grant Access" in popup...' : '1-Click Sign In'}
-            </button>
-          </div>
-        )}
-
-        {/* === 4. GOOGLE DRIVE / DROPBOX / BOX (CLEAN 2-STEP EXPRESS) === */}
-        {provider.authMode === 'oauth2' && !isDeviceFlowProvider && (
-          <form onSubmit={handleSubmit} className="space-y-3">
-            {provider.oauthConfigured && (
-              <button
-                type="button"
-                onClick={launchSavedOAuthPopup}
-                className="w-full py-3 rounded-xl bg-[#00F0FF] hover:bg-[#33F3FF] text-black text-xs font-bold transition"
-              >
-                1-Click Sign in with {provider.name}
-              </button>
-            )}
-
-            {provider.id === 'google_drive' ? (
-              <button
-                type="button"
-                onClick={openGooglePlaygroundPopup}
-                className="w-full py-2.5 px-3.5 rounded-xl bg-black hover:bg-white/[0.04] border border-[#00F0FF]/40 text-[#00F0FF] text-xs font-bold inline-flex items-center justify-between transition"
-              >
-                <span>1. Authorize Google Account</span>
-                <ExternalLink className="w-3.5 h-3.5" />
-              </button>
-            ) : (
-              provider.consoleUrl && (
-                <a
-                  href={provider.consoleUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="w-full py-2.5 px-3.5 rounded-xl bg-black hover:bg-white/[0.04] border border-[#00F0FF]/40 text-[#00F0FF] text-xs font-bold inline-flex items-center justify-between transition"
+                <motion.button
+                  whileHover={{ y: -1 }}
+                  whileTap={{ scale: 0.98 }}
+                  type="button"
+                  disabled={loading || ncPolling}
+                  onClick={handleStartNextcloudFlow}
+                  className="w-full py-3 rounded-full bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center justify-center gap-2 shadow-glow transition"
                 >
-                  <span>1. Generate {provider.name} Token</span>
-                  <ExternalLink className="w-3.5 h-3.5" />
-                </a>
-              )
+                  {(loading || ncPolling) && <Loader2 className="w-4 h-4 animate-spin" />}
+                  {ncPolling ? 'Click "Grant Access" in popup...' : '1-Click Sign In'}
+                </motion.button>
+              </div>
             )}
 
-            <input
-              type="password"
-              required
-              value={smartPayload}
-              onChange={(e) => setSmartPayload(e.target.value)}
-              placeholder="2. Paste Token Here"
-              className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
-            />
+            {/* 4. Google Drive / Dropbox / Box */}
+            {provider.authMode === 'oauth2' && !isDeviceFlowProvider && (
+              <form onSubmit={handleSubmit} className="space-y-3">
+                {provider.oauthConfigured && (
+                  <motion.button
+                    whileHover={{ y: -1 }}
+                    whileTap={{ scale: 0.98 }}
+                    type="button"
+                    onClick={launchSavedOAuthPopup}
+                    className="w-full py-3 rounded-full bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold shadow-glow transition"
+                  >
+                    1-Click Sign in with {provider.name}
+                  </motion.button>
+                )}
 
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full py-3 rounded-xl bg-[#00F0FF] hover:bg-[#33F3FF] text-black text-xs font-bold inline-flex items-center justify-center gap-2 transition"
-            >
-              {loading && <Loader2 className="w-4 h-4 animate-spin" />}
-              {loading ? 'Connecting...' : 'Connect'}
-            </button>
-          </form>
-        )}
+                {provider.id === 'google_drive' ? (
+                  <button
+                    type="button"
+                    onClick={openGooglePlaygroundPopup}
+                    className="w-full py-2.5 px-4 rounded-2xl bg-canvas hover:bg-elevated border border-line-strong text-ink text-xs font-medium inline-flex items-center justify-between transition"
+                  >
+                    <span>1. Authorize Google Account</span>
+                    <ExternalLink className="w-3.5 h-3.5 text-accent" />
+                  </button>
+                ) : (
+                  provider.consoleUrl && (
+                    <a
+                      href={provider.consoleUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="w-full py-2.5 px-4 rounded-2xl bg-canvas hover:bg-elevated border border-line-strong text-ink text-xs font-medium inline-flex items-center justify-between transition"
+                    >
+                      <span>1. Generate {provider.name} Token</span>
+                      <ExternalLink className="w-3.5 h-3.5 text-accent" />
+                    </a>
+                  )
+                )}
 
-        {/* === 5. S3 BUCKETS (Storj / R2 / Backblaze B2) === */}
-        {provider.authMode === 's3' && (
-          <form onSubmit={handleSubmit} className="space-y-2.5">
-            {!provider.defaultEndpoint && (
-              <input
-                type="url"
-                required
-                value={s3Endpoint}
-                onChange={(e) => setS3Endpoint(e.target.value)}
-                placeholder="S3 Endpoint URL"
-                className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
-              />
+                <input
+                  type="password"
+                  required
+                  value={smartPayload}
+                  onChange={(e) => setSmartPayload(e.target.value)}
+                  placeholder="2. Paste Token Here"
+                  className={`${inputCls} font-mono`}
+                />
+
+                <motion.button
+                  whileHover={{ y: -1 }}
+                  whileTap={{ scale: 0.98 }}
+                  type="submit"
+                  disabled={loading}
+                  className="w-full py-3 rounded-full bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center justify-center gap-2 shadow-glow transition"
+                >
+                  {loading && <Loader2 className="w-4 h-4 animate-spin" />}
+                  {loading ? 'Connecting...' : 'Connect'}
+                </motion.button>
+              </form>
             )}
-            <input
-              type="text"
-              required
-              value={s3Bucket}
-              onChange={(e) => setS3Bucket(e.target.value)}
-              placeholder="Bucket Name"
-              className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
-            />
-            <input
-              type="text"
-              required
-              value={s3AccessKey}
-              onChange={(e) => setS3AccessKey(e.target.value)}
-              placeholder="Access Key ID"
-              className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
-            />
-            <input
-              type="password"
-              required
-              value={s3SecretKey}
-              onChange={(e) => setS3SecretKey(e.target.value)}
-              placeholder="Secret Key"
-              className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
-            />
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full py-3 rounded-xl bg-[#00F0FF] text-black text-xs font-bold inline-flex items-center justify-center gap-2"
-            >
-              {loading && <Loader2 className="w-4 h-4 animate-spin" />}
-              {loading ? 'Connecting...' : 'Connect Bucket'}
-            </button>
-          </form>
-        )}
 
-        {/* === 6. SUPABASE STORAGE === */}
-        {provider.authMode === 'supabase' && (
-          <form onSubmit={handleSubmit} className="space-y-3">
-            <input
-              type="url"
-              required
-              value={sbUrl}
-              onChange={(e) => setSbUrl(e.target.value)}
-              placeholder="https://project.supabase.co"
-              className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
-            />
-            <input
-              type="password"
-              required
-              value={sbKey}
-              onChange={(e) => setSbKey(e.target.value)}
-              placeholder="Service Role Key"
-              className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
-            />
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full py-3 rounded-xl bg-[#00F0FF] text-black text-xs font-bold inline-flex items-center justify-center gap-2"
-            >
-              {loading && <Loader2 className="w-4 h-4 animate-spin" />}
-              Connect
-            </button>
-          </form>
-        )}
-      </div>
-    </div>
+            {/* 5. S3 Buckets */}
+            {provider.authMode === 's3' && (
+              <form onSubmit={handleSubmit} className="space-y-2.5">
+                {!provider.defaultEndpoint && (
+                  <input
+                    type="url"
+                    required
+                    value={s3Endpoint}
+                    onChange={(e) => setS3Endpoint(e.target.value)}
+                    placeholder="S3 Endpoint URL"
+                    className={`${inputCls} font-mono`}
+                  />
+                )}
+                <input
+                  type="text"
+                  required
+                  value={s3Bucket}
+                  onChange={(e) => setS3Bucket(e.target.value)}
+                  placeholder="Bucket Name"
+                  className={`${inputCls} font-mono`}
+                />
+                <input
+                  type="text"
+                  required
+                  value={s3AccessKey}
+                  onChange={(e) => setS3AccessKey(e.target.value)}
+                  placeholder="Access Key ID"
+                  className={`${inputCls} font-mono`}
+                />
+                <input
+                  type="password"
+                  required
+                  value={s3SecretKey}
+                  onChange={(e) => setS3SecretKey(e.target.value)}
+                  placeholder="Secret Key"
+                  className={`${inputCls} font-mono`}
+                />
+                <motion.button
+                  whileHover={{ y: -1 }}
+                  whileTap={{ scale: 0.98 }}
+                  type="submit"
+                  disabled={loading}
+                  className="w-full py-3 rounded-full bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center justify-center gap-2 shadow-glow transition"
+                >
+                  {loading && <Loader2 className="w-4 h-4 animate-spin" />}
+                  {loading ? 'Connecting...' : 'Connect Bucket'}
+                </motion.button>
+              </form>
+            )}
+
+            {/* 6. Supabase */}
+            {provider.authMode === 'supabase' && (
+              <form onSubmit={handleSubmit} className="space-y-3">
+                <input
+                  type="url"
+                  required
+                  value={sbUrl}
+                  onChange={(e) => setSbUrl(e.target.value)}
+                  placeholder="https://project.supabase.co"
+                  className={`${inputCls} font-mono`}
+                />
+                <input
+                  type="password"
+                  required
+                  value={sbKey}
+                  onChange={(e) => setSbKey(e.target.value)}
+                  placeholder="Service Role Key"
+                  className={`${inputCls} font-mono`}
+                />
+                <motion.button
+                  whileHover={{ y: -1 }}
+                  whileTap={{ scale: 0.98 }}
+                  type="submit"
+                  disabled={loading}
+                  className="w-full py-3 rounded-full bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center justify-center gap-2 shadow-glow transition"
+                >
+                  {loading && <Loader2 className="w-4 h-4 animate-spin" />}
+                  Connect
+                </motion.button>
+              </form>
+            )}
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
   );
 };
