@@ -18,6 +18,10 @@ import {
   Terminal,
   Blocks,
   SlidersHorizontal,
+  Radar,
+  Wand2,
+  CheckCircle2,
+  AppWindow,
 } from 'lucide-react';
 import type { VaultState, AiApiKey } from '../types';
 import { formatRelativeTime } from '../lib/format';
@@ -31,6 +35,12 @@ import {
   type DetectedLocalModel,
   type ChatTurnMessage,
 } from '../lib/localAiPlugPlay';
+import {
+  scanForAiApps,
+  autoConnectMcpAppViaBridge,
+  type DetectedAiApp,
+  type CustomAppCapabilityHint,
+} from '../lib/aiAppScanner';
 
 interface AiApiKeysViewProps {
   vault: VaultState;
@@ -49,6 +59,16 @@ interface AiApiKeysViewProps {
     folderId: string | null
   ) => Promise<void>;
 }
+
+const POPULAR_APP_PRESETS = [
+  'Cursor',
+  'Claude Desktop',
+  'LM Studio',
+  'OpenWebUI',
+  'ChatBox',
+  'AnythingLLM',
+  'Jan',
+];
 
 export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
   vault,
@@ -73,8 +93,36 @@ export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
     vault.apiKeys[0] ||
     null;
 
-  // Local AI runtime auto-discovery state
-  const [scanning, setScanning] = useState(false);
+  const origin =
+    typeof window !== 'undefined'
+      ? window.location.origin
+      : 'http://127.0.0.1:3000';
+  const vaultIdParam = encodeURIComponent(getOrCreateVaultId());
+  const keyIdParam = selectedKeyObj
+    ? `&keyId=${encodeURIComponent(selectedKeyObj.id)}`
+    : '';
+  const activeKeyToken = selectedKeyObj?.key || 'cldy_sk_YOUR_KEY';
+
+  const offlineZipHref = `/api/ai-keys/offline-bundle.zip?vaultId=${vaultIdParam}${keyIdParam}`;
+  const openWebUiHref = `/api/ai-keys/openwebui-tool.py?vaultId=${vaultIdParam}${keyIdParam}`;
+
+  // --- Scan for AI Apps State ---
+  const [scanningApps, setScanningApps] = useState(false);
+  const [detectedApps, setDetectedApps] = useState<DetectedAiApp[]>([]);
+  const [selectedAppId, setSelectedAppId] = useState<string>('');
+  const [customAppName, setCustomAppName] = useState('');
+  const [customAppPortOrUrl, setCustomAppPortOrUrl] = useState('');
+  const [capabilityHint, setCapabilityHint] =
+    useState<CustomAppCapabilityHint>('auto');
+  const [autoConnectingAppId, setAutoConnectingAppId] = useState<string | null>(
+    null
+  );
+  const [autoConnectBanner, setAutoConnectBanner] = useState<string | null>(
+    null
+  );
+
+  // --- Local AI Model Scanner & Built-in Vault Chat State ---
+  const [scanningModels, setScanningModels] = useState(false);
   const [bridgeRunning, setBridgeRunning] = useState(false);
   const [bridgeOnlineSync, setBridgeOnlineSync] = useState(false);
   const [detectedRuntimes, setDetectedRuntimes] = useState<string[]>([]);
@@ -85,13 +133,12 @@ export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
     getSavedCustomLocalAiUrl()
   );
 
-  // Built-in Plug & Play Vault AI Chat
   const [chatHistory, setChatHistory] = useState<ChatTurnMessage[]>([]);
   const [chatPrompt, setChatPrompt] = useState('');
   const [chatLoading, setChatLoading] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
 
-  // Key management & developer tab state
+  // --- Key Management & Developer Code Tab State ---
   const [name, setName] = useState('');
   const [scope, setScope] = useState<'read' | 'read_write'>('read');
   const [folderRestriction, setFolderRestriction] = useState<string>('all');
@@ -103,20 +150,48 @@ export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
   const [testOutput, setTestOutput] = useState<string>('');
   const [testing, setTesting] = useState(false);
 
-  const origin =
-    typeof window !== 'undefined'
-      ? window.location.origin
-      : 'http://127.0.0.1:3000';
-  const vaultIdParam = encodeURIComponent(getOrCreateVaultId());
-  const keyIdParam = selectedKeyObj ? `&keyId=${encodeURIComponent(selectedKeyObj.id)}` : '';
-  const activeKeyToken = selectedKeyObj?.key || 'cldy_sk_YOUR_KEY';
+  const copyText = (id: string, text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedId(id);
+    setTimeout(() => setCopiedId(null), 2200);
+  };
 
-  const offlineZipHref = `/api/ai-keys/offline-bundle.zip?vaultId=${vaultIdParam}${keyIdParam}`;
-  const openWebUiHref = `/api/ai-keys/openwebui-tool.py?vaultId=${vaultIdParam}${keyIdParam}`;
+  const runAppScan = useCallback(
+    async (opts?: {
+      nameOverride?: string;
+      urlOverride?: string;
+      hintOverride?: CustomAppCapabilityHint;
+      selectFirst?: boolean;
+    }) => {
+      setScanningApps(true);
+      setAutoConnectBanner(null);
+      try {
+        const res = await scanForAiApps({
+          apiKey: activeKeyToken,
+          origin,
+          customAppName: opts?.nameOverride ?? customAppName,
+          customAppUrl: opts?.urlOverride ?? customAppPortOrUrl,
+          capabilityHint: opts?.hintOverride ?? capabilityHint,
+        });
+        setBridgeRunning(res.bridgeRunning);
+        setDetectedApps(res.apps);
+        if (res.apps.length > 0) {
+          setSelectedAppId((prev) =>
+            opts?.selectFirst || !res.apps.some((a) => a.id === prev)
+              ? res.apps[0].id
+              : prev
+          );
+        }
+      } finally {
+        setScanningApps(false);
+      }
+    },
+    [activeKeyToken, origin, customAppName, customAppPortOrUrl, capabilityHint]
+  );
 
-  const scanLocalAi = useCallback(
+  const scanLocalAiModels = useCallback(
     async (customOverride?: string) => {
-      setScanning(true);
+      setScanningModels(true);
       try {
         const res = await detectLocalAiRuntimes(
           selectedKeyObj?.key,
@@ -132,23 +207,37 @@ export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
           );
         }
       } finally {
-        setScanning(false);
+        setScanningModels(false);
       }
     },
     [selectedKeyObj?.key, customUrlInput]
   );
 
   useEffect(() => {
-    scanLocalAi();
-  }, [scanLocalAi]);
+    scanLocalAiModels();
+    runAppScan();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedKeyObj?.id]);
+
+  const activeAppGuide =
+    detectedApps.find((a) => a.id === selectedAppId) || detectedApps[0] || null;
 
   const selectedModel =
     localModels.find((m) => m.uid === selectedModelUid) || localModels[0] || null;
 
-  const copyText = (id: string, text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedId(id);
-    setTimeout(() => setCopiedId(null), 2000);
+  const handleAutoConnectApp = async (appId: string) => {
+    setAutoConnectingAppId(appId);
+    setAutoConnectBanner(null);
+    try {
+      const res = await autoConnectMcpAppViaBridge(appId, activeKeyToken);
+      setAutoConnectBanner(res.message);
+    } catch (err) {
+      setAutoConnectBanner(
+        err instanceof Error ? err.message : 'Auto-connect failed'
+      );
+    } finally {
+      setAutoConnectingAppId(null);
+    }
   };
 
   const handleSendChat = async (promptOverride?: string) => {
@@ -327,7 +416,7 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
               Plug & Play Local AI
             </h1>
             <p className="text-xs text-ink-secondary mt-1">
-              Connect Ollama, LM Studio, DeepSeek, Qwen, or OpenWebUI in 1 click — zero manual coding, works offline & auto-syncs live.
+              Scan your AI apps for automatic setup instructions, or chat directly with your offline & online models.
             </p>
           </div>
 
@@ -371,8 +460,326 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
               transition={{ duration: 0.18 }}
               className="space-y-6"
             >
-              {/* Hero Card: Instant Auto-Detect + Built-In Vault AI Chat */}
+              {/* CARD 1: SCAN FOR AI APPS (Auto-Detects Best Way + Gives Tailored Instructions) */}
               <div className="rounded-3xl bg-surface border border-line-strong p-5 sm:p-6 shadow-card space-y-5">
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-3.5">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-2xl bg-accent-soft text-accent flex items-center justify-center shrink-0">
+                      <Radar
+                        className={`w-5 h-5 ${scanningApps ? 'animate-spin' : ''}`}
+                      />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm font-semibold text-ink">
+                          Scan for AI Apps
+                        </span>
+                        {detectedApps.length > 0 ? (
+                          <span className="px-2.5 py-0.5 rounded-full bg-[#10A37F]/15 text-[#10A37F] text-[11px] font-medium">
+                            {detectedApps.length} AI app
+                            {detectedApps.length === 1 ? '' : 's'} detected
+                          </span>
+                        ) : (
+                          <span className="px-2.5 py-0.5 rounded-full bg-elevated text-ink-muted text-[11px] font-medium">
+                            Ready to scan ports & apps
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-ink-muted mt-0.5">
+                        Scans local AI apps, automatically picks the best connection method, and gives exact 1-click steps.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <select
+                      value={selectedKeyObj?.id || ''}
+                      onChange={(e) => setSelectedKeyId(e.target.value)}
+                      title="Choose which Cloudy permission key to link"
+                      className="px-3 py-2 rounded-full bg-canvas border border-line text-xs text-ink focus:outline-none"
+                    >
+                      {activeKeys.map((k) => (
+                        <option key={k.id} value={k.id} className="bg-surface">
+                          Key: {k.name} (
+                          {k.scope === 'read_write' ? 'Read & Write' : 'Read'})
+                        </option>
+                      ))}
+                    </select>
+
+                    <motion.button
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.97 }}
+                      type="button"
+                      disabled={scanningApps}
+                      onClick={() => {
+                        runAppScan();
+                        scanLocalAiModels();
+                      }}
+                      className="px-4 py-2 rounded-full bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center gap-1.5 shadow-glow transition"
+                    >
+                      <Radar
+                        className={`w-3.5 h-3.5 ${scanningApps ? 'animate-spin' : ''}`}
+                      />
+                      {scanningApps ? 'Scanning Apps...' : 'Scan for Apps'}
+                    </motion.button>
+                  </div>
+                </div>
+
+                {/* Custom / Unlisted App Matcher (e.g. "Local") + Popular Presets */}
+                <div className="rounded-2xl bg-canvas border border-line p-3.5 space-y-3">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <span className="text-[11px] font-medium text-ink-secondary">
+                      Connecting a desktop or custom app (like &ldquo;Local&rdquo;)? Enter it or tap below to auto-detect the best way:
+                    </span>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      {POPULAR_APP_PRESETS.map((preset) => (
+                        <button
+                          key={preset}
+                          type="button"
+                          onClick={() => {
+                            setCustomAppName(preset);
+                            runAppScan({
+                              nameOverride: preset,
+                              hintOverride: 'auto',
+                              selectFirst: true,
+                            });
+                          }}
+                          className="px-2.5 py-1 rounded-full bg-surface hover:bg-elevated border border-line text-[10.5px] text-ink-secondary hover:text-ink transition"
+                        >
+                          {preset}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      runAppScan({ selectFirst: true });
+                    }}
+                    className="grid grid-cols-1 sm:grid-cols-12 gap-2"
+                  >
+                    <input
+                      type="text"
+                      value={customAppName}
+                      onChange={(e) => setCustomAppName(e.target.value)}
+                      placeholder="App name (e.g. Local)"
+                      className="sm:col-span-4 px-3.5 py-2 rounded-xl bg-surface border border-line focus:border-accent focus:outline-none text-xs text-ink placeholder:text-ink-muted"
+                    />
+                    <input
+                      type="text"
+                      value={customAppPortOrUrl}
+                      onChange={(e) => setCustomAppPortOrUrl(e.target.value)}
+                      placeholder="Port or URL if running (e.g. 5000)"
+                      className="sm:col-span-3 px-3.5 py-2 rounded-xl bg-surface border border-line focus:border-accent focus:outline-none text-xs text-ink placeholder:text-ink-muted"
+                    />
+                    <select
+                      value={capabilityHint}
+                      onChange={(e) =>
+                        setCapabilityHint(e.target.value as CustomAppCapabilityHint)
+                      }
+                      className="sm:col-span-3 px-3 py-2 rounded-xl bg-surface border border-line text-xs text-ink focus:outline-none"
+                    >
+                      <option value="auto">Auto-Detect Best Way</option>
+                      <option value="mcp">App Supports MCP / Plugins</option>
+                      <option value="openai_url">App Supports OpenAI URL</option>
+                      <option value="custom_code">My Own Custom App / Code</option>
+                    </select>
+                    <button
+                      type="submit"
+                      disabled={scanningApps}
+                      className="sm:col-span-2 px-3.5 py-2 rounded-xl bg-elevated hover:bg-accent hover:text-accent-fg border border-line-strong text-xs font-semibold text-ink inline-flex items-center justify-center gap-1.5 transition"
+                    >
+                      <Wand2 className="w-3.5 h-3.5" />
+                      Detect
+                    </button>
+                  </form>
+                </div>
+
+                {/* Detected Apps Selector + Tailored Best-Way Instructions */}
+                {detectedApps.length > 0 && activeAppGuide ? (
+                  <div className="space-y-4">
+                    {/* App Pills */}
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {detectedApps.map((app) => {
+                        const selected = app.id === activeAppGuide.id;
+                        return (
+                          <button
+                            key={app.id}
+                            type="button"
+                            onClick={() => {
+                              setSelectedAppId(app.id);
+                              setAutoConnectBanner(null);
+                            }}
+                            className={`px-3.5 py-2 rounded-2xl border text-xs font-medium inline-flex items-center gap-2 transition ${
+                              selected
+                                ? 'bg-accent-soft border-accent text-ink shadow-card'
+                                : 'bg-canvas border-line hover:border-line-strong text-ink-secondary hover:text-ink'
+                            }`}
+                          >
+                            <AppWindow className="w-3.5 h-3.5 text-accent" />
+                            <span>{app.name}</span>
+                            <span
+                              className={`px-2 py-0.5 rounded-full text-[10px] ${
+                                app.status === 'running'
+                                  ? 'bg-[#10A37F]/15 text-[#10A37F]'
+                                  : app.status === 'installed'
+                                    ? 'bg-accent-soft text-accent'
+                                    : 'bg-elevated text-ink-muted'
+                              }`}
+                            >
+                              {app.status === 'running'
+                                ? `Running${app.endpoint ? ` · ${app.endpoint.replace('http://127.0.0.1', '')}` : ''}`
+                                : app.status === 'installed'
+                                  ? 'Installed'
+                                  : 'Matched'}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Tailored Best-Method Recommendation + Step-by-Step Guide */}
+                    <motion.div
+                      key={activeAppGuide.id + activeAppGuide.bestMethod}
+                      initial={{ opacity: 0, y: 6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="rounded-2xl bg-canvas border border-line-strong p-4 sm:p-5 space-y-4"
+                    >
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-line">
+                        <div>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-sm font-semibold text-ink">
+                              How to Connect Cloudy → {activeAppGuide.name}
+                            </span>
+                            <span className="px-2.5 py-0.5 rounded-full bg-[#10A37F]/15 text-[#10A37F] text-[11px] font-semibold">
+                              ✓ {activeAppGuide.bestMethodBadge}
+                            </span>
+                          </div>
+                          <p className="text-xs text-ink-secondary mt-1 leading-relaxed">
+                            {activeAppGuide.whyBest}
+                          </p>
+                        </div>
+                      </div>
+
+                      {autoConnectBanner && (
+                        <div className="px-3.5 py-2.5 rounded-xl bg-[#10A37F]/15 border border-[#10A37F]/40 text-xs text-[#10A37F] flex items-center gap-2">
+                          <CheckCircle2 className="w-4 h-4 shrink-0" />
+                          <span>{autoConnectBanner}</span>
+                        </div>
+                      )}
+
+                      <div className="space-y-3">
+                        {activeAppGuide.steps.map((step) => {
+                          const action = step.action;
+                          return (
+                            <div
+                              key={step.stepNumber}
+                              className="flex flex-col md:flex-row md:items-center justify-between gap-3 p-3.5 rounded-2xl bg-surface border border-line"
+                            >
+                              <div className="flex items-start gap-3">
+                                <div className="w-6 h-6 rounded-full bg-accent-soft text-accent text-xs font-semibold flex items-center justify-center shrink-0 mt-0.5">
+                                  {step.stepNumber}
+                                </div>
+                                <div className="space-y-0.5">
+                                  <div className="text-xs font-semibold text-ink">
+                                    {step.title}
+                                  </div>
+                                  <p className="text-[11.5px] text-ink-secondary leading-relaxed">
+                                    {step.detail}
+                                  </p>
+                                </div>
+                              </div>
+
+                              {action && (
+                                <div className="shrink-0 pl-9 md:pl-0">
+                                  {action.type === 'download_zip' && (
+                                    <a
+                                      href={offlineZipHref}
+                                      className="px-3.5 py-2 rounded-full bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center gap-1.5 shadow-glow transition"
+                                    >
+                                      <Download className="w-3.5 h-3.5" />
+                                      {action.label}
+                                    </a>
+                                  )}
+
+                                  {action.type === 'download_openwebui' && (
+                                    <a
+                                      href={openWebUiHref}
+                                      className="px-3.5 py-2 rounded-full bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center gap-1.5 shadow-glow transition"
+                                    >
+                                      <Download className="w-3.5 h-3.5" />
+                                      {action.label}
+                                    </a>
+                                  )}
+
+                                  {action.type === 'copy' && (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        copyText(action.id, action.value)
+                                      }
+                                      className="px-3.5 py-2 rounded-full bg-elevated hover:bg-accent hover:text-accent-fg border border-line-strong text-xs font-semibold text-ink inline-flex items-center gap-1.5 transition"
+                                    >
+                                      {copiedId === action.id ? (
+                                        <>
+                                          <Check className="w-3.5 h-3.5 text-[#10A37F]" />
+                                          Copied!
+                                        </>
+                                      ) : (
+                                        <>
+                                          <Copy className="w-3.5 h-3.5" />
+                                          {action.label}
+                                        </>
+                                      )}
+                                    </button>
+                                  )}
+
+                                  {action.type === 'auto_connect_mcp' && (
+                                    <button
+                                      type="button"
+                                      disabled={
+                                        autoConnectingAppId === action.appId
+                                      }
+                                      onClick={() =>
+                                        handleAutoConnectApp(action.appId)
+                                      }
+                                      className="px-4 py-2 rounded-full bg-[#10A37F] hover:opacity-90 text-white text-xs font-semibold inline-flex items-center gap-1.5 shadow-card transition disabled:opacity-50"
+                                    >
+                                      <Wand2 className="w-3.5 h-3.5" />
+                                      {autoConnectingAppId === action.appId
+                                        ? 'Connecting...'
+                                        : action.label}
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </motion.div>
+                  </div>
+                ) : (
+                  <div className="rounded-2xl bg-canvas border border-line p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="text-xs text-ink-secondary leading-relaxed">
+                      No open local AI ports responded yet. Type your app name above (for example{' '}
+                      <strong className="text-ink">Local</strong>), tap a preset chip, or run{' '}
+                      <span className="font-mono text-ink">Start-Cloudy-AI</span> so Cloudy can scan installed desktop apps automatically.
+                    </div>
+                    <a
+                      href={offlineZipHref}
+                      className="px-4 py-2 rounded-full bg-surface hover:bg-elevated border border-line-strong text-xs font-semibold text-ink inline-flex items-center gap-1.5 shrink-0 transition"
+                    >
+                      <Download className="w-3.5 h-3.5 text-accent" />
+                      Download Bridge (.zip)
+                    </a>
+                  </div>
+                )}
+              </div>
+
+              {/* CARD 2: INSTANT LOCAL MODEL SCANNER + BUILT-IN VAULT CHAT */}
+              <div className="rounded-3xl bg-surface border border-line p-5 sm:p-6 shadow-card space-y-5">
                 <div className="flex flex-col md:flex-row md:items-center justify-between gap-3.5">
                   <div className="flex items-center gap-3">
                     <div className="w-10 h-10 rounded-2xl bg-accent-soft text-accent flex items-center justify-center shrink-0">
@@ -381,11 +788,12 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
                     <div>
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="text-sm font-semibold text-ink">
-                          Instant Local AI Scanner
+                          Chat Directly With Your Local AI Models
                         </span>
                         {localModels.length > 0 ? (
                           <span className="px-2.5 py-0.5 rounded-full bg-[#10A37F]/15 text-[#10A37F] text-[11px] font-medium">
-                            {localModels.length} model{localModels.length === 1 ? '' : 's'} ready
+                            {localModels.length} model
+                            {localModels.length === 1 ? '' : 's'} ready
                             {detectedRuntimes.length > 0
                               ? ` · ${detectedRuntimes.join(', ')}`
                               : ''}
@@ -396,7 +804,7 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
                           </span>
                         ) : (
                           <span className="px-2.5 py-0.5 rounded-full bg-elevated text-ink-muted text-[11px] font-medium">
-                            Waiting for Local AI
+                            No active model server yet
                           </span>
                         )}
                         {bridgeRunning && (
@@ -406,7 +814,7 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
                         )}
                       </div>
                       <p className="text-xs text-ink-muted mt-0.5">
-                        Auto-detects Ollama (:11434), LM Studio (:1234), llama.cpp (:8080), Jan (:1337) & Cloudy Bridge (:8765)
+                        Test your local models against your Cloudy files right here (works offline & online)
                       </p>
                     </div>
                   </div>
@@ -421,19 +829,17 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
                       Custom Port
                     </button>
 
-                    <motion.button
-                      whileHover={{ scale: 1.02 }}
-                      whileTap={{ scale: 0.97 }}
+                    <button
                       type="button"
-                      disabled={scanning}
-                      onClick={() => scanLocalAi()}
-                      className="px-4 py-2 rounded-full bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center gap-1.5 shadow-glow transition"
+                      disabled={scanningModels}
+                      onClick={() => scanLocalAiModels()}
+                      className="px-3.5 py-2 rounded-full bg-elevated hover:bg-canvas border border-line-strong text-xs font-medium text-ink inline-flex items-center gap-1.5 transition"
                     >
                       <RefreshCw
-                        className={`w-3.5 h-3.5 ${scanning ? 'animate-spin' : ''}`}
+                        className={`w-3.5 h-3.5 ${scanningModels ? 'animate-spin' : ''}`}
                       />
-                      {scanning ? 'Scanning...' : 'Scan Local AI'}
-                    </motion.button>
+                      Refresh Models
+                    </button>
                   </div>
                 </div>
 
@@ -450,7 +856,7 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
                       type="button"
                       onClick={() => {
                         saveCustomLocalAiUrl(customUrlInput);
-                        scanLocalAi(customUrlInput);
+                        scanLocalAiModels(customUrlInput);
                       }}
                       className="px-4 py-2 rounded-xl bg-elevated hover:bg-accent hover:text-accent-fg text-xs font-medium text-ink transition"
                     >
@@ -460,42 +866,24 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
                 )}
 
                 {localModels.length > 0 ? (
-                  <div className="space-y-4 pt-1">
-                    {/* Model + Scoped Key Selector Bar */}
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                      <div className="flex items-center gap-2 px-3.5 py-2 rounded-2xl bg-canvas border border-line">
-                        <span className="text-[11px] text-ink-muted shrink-0">Model:</span>
-                        <select
-                          value={selectedModel?.uid || ''}
-                          onChange={(e) => setSelectedModelUid(e.target.value)}
-                          className="flex-1 bg-transparent text-xs font-medium text-ink focus:outline-none truncate"
-                        >
-                          {localModels.map((m) => (
-                            <option key={m.uid} value={m.uid} className="bg-surface">
-                              {m.name} ({m.providerName})
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-
-                      <div className="flex items-center gap-2 px-3.5 py-2 rounded-2xl bg-canvas border border-line">
-                        <span className="text-[11px] text-ink-muted shrink-0">Access:</span>
-                        <select
-                          value={selectedKeyObj?.id || ''}
-                          onChange={(e) => setSelectedKeyId(e.target.value)}
-                          className="flex-1 bg-transparent text-xs font-medium text-ink focus:outline-none truncate"
-                        >
-                          {activeKeys.map((k) => (
-                            <option key={k.id} value={k.id} className="bg-surface">
-                              {k.name} · {k.scope === 'read_write' ? 'Read & Write' : 'Read Only'}
-                              {k.allowedFolderIds.length > 0 ? ' (Scoped)' : ' (All Carpetas)'}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
+                  <div className="space-y-4">
+                    <div className="flex items-center gap-2 px-3.5 py-2 rounded-2xl bg-canvas border border-line">
+                      <span className="text-[11px] text-ink-muted shrink-0">
+                        Active Local Model:
+                      </span>
+                      <select
+                        value={selectedModel?.uid || ''}
+                        onChange={(e) => setSelectedModelUid(e.target.value)}
+                        className="flex-1 bg-transparent text-xs font-medium text-ink focus:outline-none truncate"
+                      >
+                        {localModels.map((m) => (
+                          <option key={m.uid} value={m.uid} className="bg-surface">
+                            {m.name} ({m.providerName})
+                          </option>
+                        ))}
+                      </select>
                     </div>
 
-                    {/* Built-In Offline + Online Vault Chat */}
                     <div className="rounded-2xl bg-canvas border border-line p-4 space-y-3">
                       {chatHistory.length === 0 ? (
                         <div className="flex flex-wrap items-center gap-2">
@@ -572,7 +960,7 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
                           type="text"
                           value={chatPrompt}
                           onChange={(e) => setChatPrompt(e.target.value)}
-                          placeholder={`Ask ${selectedModel?.name || 'Local AI'} about your Cloudy files (works offline)...`}
+                          placeholder={`Ask ${selectedModel?.name || 'Local AI'} about your Cloudy files...`}
                           className="flex-1 px-4 py-2.5 rounded-full bg-surface border border-line focus:border-accent focus:outline-none text-xs text-ink placeholder:text-ink-muted"
                         />
                         <button
@@ -586,52 +974,34 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
                     </div>
                   </div>
                 ) : (
-                  <div className="rounded-2xl bg-canvas border border-line p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
-                    <div className="space-y-1">
-                      <div className="text-xs font-medium text-ink">
-                        Zero-Code Setup: Double-click the launcher to connect any local AI
-                      </div>
-                      <p className="text-[11px] text-ink-muted leading-relaxed">
-                        Download the pre-configured pack below and open{' '}
-                        <span className="text-ink font-mono">Start-Cloudy-AI</span> (or start Ollama with{' '}
-                        <button
-                          type="button"
-                          onClick={() => copyText('cors', ollamaCorsCmd)}
-                          className="text-accent hover:underline font-mono"
-                        >
-                          {copiedId === 'cors' ? 'Copied!' : ollamaCorsCmd}
-                        </button>
-                        ), then click <strong>Scan Local AI</strong>.
-                      </p>
-                    </div>
-
-                    <a
-                      href={offlineZipHref}
-                      className="px-4 py-2.5 rounded-full bg-surface hover:bg-elevated border border-line-strong text-ink text-xs font-semibold inline-flex items-center gap-2 shrink-0 shadow-card transition"
-                    >
-                      <Download className="w-4 h-4 text-accent" />
-                      Download Launcher (.zip)
-                    </a>
+                  <div className="text-xs text-ink-muted flex flex-wrap items-center justify-between gap-2">
+                    <span>
+                      Start Ollama (<button
+                        type="button"
+                        onClick={() => copyText('cors', ollamaCorsCmd)}
+                        className="text-accent hover:underline font-mono"
+                      >
+                        {copiedId === 'cors' ? 'Copied!' : ollamaCorsCmd}
+                      </button>) or launch <span className="text-ink font-mono">Start-Cloudy-AI</span> to chat right here.
+                    </span>
                   </div>
                 )}
               </div>
 
-              {/* 3 Plug & Play External App Cards (Zero Manual Code Needed) */}
+              {/* 3 Quick Plug & Play Download / Copy Tiles */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                {/* Card 1: Double-Click Launcher + OpenAI /v1 Proxy */}
                 <div className="rounded-3xl bg-surface border border-line p-5 flex flex-col justify-between gap-4 shadow-card">
                   <div className="space-y-2">
                     <div className="w-9 h-9 rounded-xl bg-accent-soft text-accent flex items-center justify-center">
                       <Terminal className="w-4 h-4" />
                     </div>
                     <h3 className="text-sm font-semibold text-ink">
-                      1. Double-Click AI Bridge
+                      Double-Click AI Bridge
                     </h3>
                     <p className="text-xs text-ink-secondary leading-relaxed">
-                      Includes Windows <code className="text-ink">.bat</code>, Mac{' '}
+                      Windows <code className="text-ink">.bat</code>, Mac{' '}
                       <code className="text-ink">.command</code> & Linux{' '}
-                      <code className="text-ink">.sh</code> launchers + Live Auto-Sync + an OpenAI-compatible{' '}
-                      <code className="text-ink">/v1</code> URL for Cursor, ChatBox & AnythingLLM.
+                      <code className="text-ink">.sh</code> launchers + 15s Live Auto-Sync + deep desktop AI app scanner.
                     </p>
                   </div>
 
@@ -650,7 +1020,7 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
                     >
                       {copiedId === 'v1url' ? (
                         <>
-                          <Check className="w-3.5 h-3.5 text-[#10A37F]" /> Copied OpenAI /v1 URL
+                          <Check className="w-3.5 h-3.5 text-[#10A37F]" /> Copied /v1 URL
                         </>
                       ) : (
                         <>
@@ -661,18 +1031,17 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
                   </div>
                 </div>
 
-                {/* Card 2: 1-Click OpenWebUI Skill */}
                 <div className="rounded-3xl bg-surface border border-line p-5 flex flex-col justify-between gap-4 shadow-card">
                   <div className="space-y-2">
                     <div className="w-9 h-9 rounded-xl bg-[#10A37F]/15 text-[#10A37F] flex items-center justify-center">
                       <Sparkles className="w-4 h-4" />
                     </div>
                     <h3 className="text-sm font-semibold text-ink">
-                      2. OpenWebUI 1-Click Skill
+                      OpenWebUI 1-Click Skill
                     </h3>
                     <p className="text-xs text-ink-secondary leading-relaxed">
                       Pre-filled with your API key & Online/Offline fallback URLs. Import once in{' '}
-                      <span className="text-ink">Workspace → Tools</span> to give any Ollama, Qwen, or DeepSeek model Read & Search skills.
+                      <span className="text-ink">Workspace → Tools</span>.
                     </p>
                   </div>
 
@@ -682,7 +1051,7 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
                       className="w-full py-2.5 px-4 rounded-full bg-elevated hover:bg-accent hover:text-accent-fg border border-line-strong text-ink text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition"
                     >
                       <Download className="w-3.5 h-3.5" />
-                      Download OpenWebUI Skill (.py)
+                      Download Skill (.py)
                     </a>
                     <button
                       type="button"
@@ -702,17 +1071,16 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
                   </div>
                 </div>
 
-                {/* Card 3: 1-Click MCP Config */}
                 <div className="rounded-3xl bg-surface border border-line p-5 flex flex-col justify-between gap-4 shadow-card">
                   <div className="space-y-2">
                     <div className="w-9 h-9 rounded-xl bg-[#D97757]/15 text-[#E58A6B] flex items-center justify-center">
                       <Blocks className="w-4 h-4" />
                     </div>
                     <h3 className="text-sm font-semibold text-ink">
-                      3. MCP 1-Click Config
+                      MCP 1-Click Config
                     </h3>
                     <p className="text-xs text-ink-secondary leading-relaxed">
-                      Zero-dependency MCP server (<code className="text-ink">cloudy_mcp_server.py</code> inside the pack) for LM Studio, Claude Desktop, Cursor, Windsurf & Cline.
+                      Zero-dependency MCP server (<code className="text-ink">cloudy_mcp_server.py</code>) for LM Studio, Claude Desktop, Cursor & Windsurf.
                     </p>
                   </div>
 
@@ -724,7 +1092,7 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
                     >
                       {copiedId === 'mcpjson' ? (
                         <>
-                          <Check className="w-3.5 h-3.5" /> Copied MCP Config JSON
+                          <Check className="w-3.5 h-3.5" /> Copied MCP JSON
                         </>
                       ) : (
                         <>
@@ -763,7 +1131,7 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
                   disabled={isOffline}
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="Key label (e.g. Ollama / Qwen Local)"
+                  placeholder="Key label (e.g. Local App / Qwen)"
                   className="flex-1 px-4 py-2.5 rounded-2xl bg-canvas border border-line focus:border-accent focus:ring-4 focus:ring-accent-soft focus:outline-none text-xs text-ink placeholder:text-ink-muted transition-all"
                 />
 

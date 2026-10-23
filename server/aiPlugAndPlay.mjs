@@ -26,6 +26,8 @@ import json
 import os
 import re
 import secrets
+import shutil
+import sys
 import threading
 import time
 import urllib.error
@@ -195,6 +197,353 @@ def discover_local_ai_models():
         except Exception:
             continue
     return runtimes, models
+
+
+def _probe_json(url, timeout=1.2):
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Cloudy-App-Scanner/3.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status == 200:
+                return json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_mcp_config_paths():
+    home = os.path.expanduser("~")
+    appdata = os.environ.get("APPDATA") or os.path.join(home, "AppData", "Roaming")
+    localapp = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
+    mac_sup = os.path.join(home, "Library", "Application Support")
+    xdg_cfg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+
+    return {
+        "cursor": {
+            "detect": [
+                os.path.join(home, ".cursor"),
+                "/Applications/Cursor.app",
+                os.path.join(localapp, "Programs", "cursor"),
+            ],
+            "config": os.path.join(home, ".cursor", "mcp.json"),
+        },
+        "claude_desktop": {
+            "detect": [
+                os.path.join(mac_sup, "Claude"),
+                os.path.join(appdata, "Claude"),
+                os.path.join(xdg_cfg, "Claude"),
+                "/Applications/Claude.app",
+            ],
+            "config": (
+                os.path.join(mac_sup, "Claude", "claude_desktop_config.json")
+                if sys.platform == "darwin"
+                else os.path.join(appdata, "Claude", "claude_desktop_config.json")
+                if os.name == "nt"
+                else os.path.join(xdg_cfg, "Claude", "claude_desktop_config.json")
+            ),
+        },
+        "windsurf": {
+            "detect": [
+                os.path.join(home, ".codeium", "windsurf"),
+                "/Applications/Windsurf.app",
+            ],
+            "config": os.path.join(home, ".codeium", "windsurf", "mcp_config.json"),
+        },
+        "lmstudio": {
+            "detect": [
+                os.path.join(home, ".lmstudio"),
+                os.path.join(home, ".cache", "lm-studio"),
+                "/Applications/LM Studio.app",
+                os.path.join(localapp, "LM-Studio"),
+            ],
+            "config": os.path.join(home, ".lmstudio", "mcp.json"),
+        },
+        "anythingllm": {
+            "detect": [
+                os.path.join(mac_sup, "anythingllm-desktop"),
+                os.path.join(appdata, "anythingllm-desktop"),
+                os.path.join(xdg_cfg, "anythingllm-desktop"),
+            ],
+            "config": (
+                os.path.join(mac_sup, "anythingllm-desktop", "storage", "plugins", "anythingllm_mcp_servers.json")
+                if sys.platform == "darwin"
+                else os.path.join(appdata, "anythingllm-desktop", "storage", "plugins", "anythingllm_mcp_servers.json")
+                if os.name == "nt"
+                else os.path.join(xdg_cfg, "anythingllm-desktop", "storage", "plugins", "anythingllm_mcp_servers.json")
+            ),
+        },
+    }
+
+
+def scan_ai_apps(custom_name="", custom_url=""):
+    home = os.path.expanduser("~")
+    appdata = os.environ.get("APPDATA") or os.path.join(home, "AppData", "Roaming")
+    localapp = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
+    mac_sup = os.path.join(home, "Library", "Application Support")
+    xdg_cfg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+    mcp_paths = _resolve_mcp_config_paths()
+
+    detected = []
+
+    # 1. Ollama
+    ollama_tags = _probe_json("http://127.0.0.1:11434/api/tags")
+    ollama_installed = bool(shutil.which("ollama") or os.path.exists(os.path.join(home, ".ollama")))
+    if isinstance(ollama_tags, dict) and isinstance(ollama_tags.get("models"), list):
+        detected.append({
+            "id": "ollama",
+            "name": "Ollama",
+            "status": "running",
+            "endpoint": "http://127.0.0.1:11434",
+            "modelsCount": len(ollama_tags["models"]),
+            "bestMethod": "in_app_and_bridge",
+            "canAutoConfigure": False,
+        })
+    elif ollama_installed:
+        detected.append({
+            "id": "ollama",
+            "name": "Ollama",
+            "status": "installed",
+            "endpoint": "http://127.0.0.1:11434",
+            "modelsCount": 0,
+            "bestMethod": "in_app_and_bridge",
+            "canAutoConfigure": False,
+        })
+
+    # 2. LM Studio
+    lms_models = _probe_json("http://127.0.0.1:1234/v1/models")
+    lms_installed = any(os.path.exists(p) for p in mcp_paths["lmstudio"]["detect"])
+    if isinstance(lms_models, dict) and isinstance(lms_models.get("data"), list):
+        detected.append({
+            "id": "lmstudio",
+            "name": "LM Studio",
+            "status": "running",
+            "endpoint": "http://127.0.0.1:1234",
+            "modelsCount": len(lms_models["data"]),
+            "bestMethod": "mcp",
+            "canAutoConfigure": True,
+            "configPath": mcp_paths["lmstudio"]["config"],
+        })
+    elif lms_installed:
+        detected.append({
+            "id": "lmstudio",
+            "name": "LM Studio",
+            "status": "installed",
+            "endpoint": "http://127.0.0.1:1234",
+            "modelsCount": 0,
+            "bestMethod": "mcp",
+            "canAutoConfigure": True,
+            "configPath": mcp_paths["lmstudio"]["config"],
+        })
+
+    # 3. OpenWebUI (check ports 3000, 8080, 8088 strictly verifying 'webui' signature)
+    owui_ep = None
+    for port in (3000, 8080, 8088):
+        cfg = _probe_json(f"http://127.0.0.1:{port}/api/config")
+        if isinstance(cfg, dict) and ("webui" in str(cfg.get("name", "")).lower() or "default_models" in cfg):
+            owui_ep = f"http://127.0.0.1:{port}"
+            break
+    if owui_ep or os.path.exists(os.path.join(home, ".open-webui")):
+        detected.append({
+            "id": "openwebui",
+            "name": "OpenWebUI",
+            "status": "running" if owui_ep else "installed",
+            "endpoint": owui_ep or "http://127.0.0.1:8080",
+            "modelsCount": 0,
+            "bestMethod": "openwebui_tool",
+            "canAutoConfigure": False,
+        })
+
+    # 4. Cursor, Claude Desktop, Windsurf
+    for app_id, label in (("cursor", "Cursor"), ("claude_desktop", "Claude Desktop"), ("windsurf", "Windsurf")):
+        info = mcp_paths[app_id]
+        if any(os.path.exists(p) for p in info["detect"]):
+            detected.append({
+                "id": app_id,
+                "name": label,
+                "status": "installed",
+                "endpoint": None,
+                "modelsCount": 0,
+                "bestMethod": "mcp",
+                "canAutoConfigure": True,
+                "configPath": info["config"],
+            })
+
+    # 5. AnythingLLM
+    allm_ping = _probe_json("http://127.0.0.1:3001/api/ping")
+    allm_installed = any(os.path.exists(p) for p in mcp_paths["anythingllm"]["detect"])
+    if (isinstance(allm_ping, dict) and allm_ping.get("online")) or allm_installed:
+        detected.append({
+            "id": "anythingllm",
+            "name": "AnythingLLM",
+            "status": "running" if isinstance(allm_ping, dict) else "installed",
+            "endpoint": "http://127.0.0.1:3001",
+            "modelsCount": 0,
+            "bestMethod": "mcp",
+            "canAutoConfigure": True,
+            "configPath": mcp_paths["anythingllm"]["config"],
+        })
+
+    # 6. Jan AI
+    jan_models = _probe_json("http://127.0.0.1:1337/v1/models")
+    jan_installed = any(
+        os.path.exists(p)
+        for p in (os.path.join(home, "jan"), os.path.join(appdata, "Jan"), "/Applications/Jan.app")
+    )
+    if (isinstance(jan_models, dict) and isinstance(jan_models.get("data"), list)) or jan_installed:
+        detected.append({
+            "id": "jan",
+            "name": "Jan AI",
+            "status": "running" if isinstance(jan_models, dict) else "installed",
+            "endpoint": "http://127.0.0.1:1337",
+            "modelsCount": len(jan_models.get("data", [])) if isinstance(jan_models, dict) else 0,
+            "bestMethod": "openai_proxy",
+            "canAutoConfigure": False,
+        })
+
+    # 7. ChatBox, Msty, GPT4All, Continue.dev, Cline
+    extra_desktop = [
+        ("chatbox", "ChatBox", [os.path.join(mac_sup, "xyz.chatboxapp.app"), os.path.join(appdata, "xyz.chatboxapp.app"), "/Applications/Chatbox.app"], "openai_proxy"),
+        ("msty", "Msty", ["/Applications/Msty.app", os.path.join(localapp, "Programs", "Msty"), os.path.join(xdg_cfg, "Msty")], "mcp"),
+        ("continue_dev", "Continue (VS Code / JetBrains)", [os.path.join(home, ".continue")], "openai_proxy"),
+    ]
+    for eid, elabel, epaths, emethod in extra_desktop:
+        if any(os.path.exists(p) for p in epaths):
+            detected.append({
+                "id": eid,
+                "name": elabel,
+                "status": "installed",
+                "endpoint": None,
+                "modelsCount": 0,
+                "bestMethod": emethod,
+                "canAutoConfigure": False,
+            })
+
+    gpt4all_models = _probe_json("http://127.0.0.1:4891/v1/models")
+    gpt4all_installed = any(
+        os.path.exists(p)
+        for p in (
+            os.path.join(mac_sup, "nomic.ai", "GPT4All"),
+            os.path.join(localapp, "nomic.ai", "GPT4All"),
+            os.path.join(home, ".local", "share", "nomic.ai", "GPT4All"),
+        )
+    )
+    if isinstance(gpt4all_models, dict) or gpt4all_installed:
+        detected.append({
+            "id": "gpt4all",
+            "name": "GPT4All",
+            "status": "running" if isinstance(gpt4all_models, dict) else "installed",
+            "endpoint": "http://127.0.0.1:4891",
+            "modelsCount": len(gpt4all_models.get("data", [])) if isinstance(gpt4all_models, dict) else 0,
+            "bestMethod": "rest_skill_api",
+            "canAutoConfigure": False,
+        })
+
+    # 8. KoboldCpp (:5001), TextGen WebUI (:5000), llama.cpp / LocalAI (:8080 when not OpenWebUI)
+    kobold = _probe_json("http://127.0.0.1:5001/api/v1/model")
+    if isinstance(kobold, dict) and kobold.get("result"):
+        detected.append({
+            "id": "koboldcpp",
+            "name": "KoboldCpp",
+            "status": "running",
+            "endpoint": "http://127.0.0.1:5001",
+            "modelsCount": 1,
+            "bestMethod": "openai_proxy",
+            "canAutoConfigure": False,
+        })
+
+    tgui = _probe_json("http://127.0.0.1:5000/v1/models")
+    if isinstance(tgui, dict) and isinstance(tgui.get("data"), list):
+        detected.append({
+            "id": "textgen_webui",
+            "name": "Text Generation WebUI",
+            "status": "running",
+            "endpoint": "http://127.0.0.1:5000",
+            "modelsCount": len(tgui["data"]),
+            "bestMethod": "openai_proxy",
+            "canAutoConfigure": False,
+        })
+
+    if owui_ep != "http://127.0.0.1:8080":
+        lcpp = _probe_json("http://127.0.0.1:8080/v1/models")
+        if isinstance(lcpp, dict) and isinstance(lcpp.get("data"), list):
+            detected.append({
+                "id": "llamacpp",
+                "name": "llama.cpp / LocalAI",
+                "status": "running",
+                "endpoint": "http://127.0.0.1:8080",
+                "modelsCount": len(lcpp["data"]),
+                "bestMethod": "in_app_and_bridge",
+                "canAutoConfigure": False,
+            })
+
+    # 9. Custom user-specified app / URL probe (e.g. app named "Local")
+    if custom_url:
+        base_u = custom_url.strip().rstrip("/").replace("/v1", "")
+        v1_probe = _probe_json(f"{base_u}/v1/models")
+        ol_probe = _probe_json(f"{base_u}/api/tags")
+        label = (custom_name or "Custom Local AI App").strip()
+        if isinstance(v1_probe, dict) and isinstance(v1_probe.get("data"), list):
+            detected.insert(0, {
+                "id": "custom_probed",
+                "name": label,
+                "status": "running",
+                "endpoint": base_u,
+                "modelsCount": len(v1_probe["data"]),
+                "detectedProtocol": "openai",
+                "bestMethod": "openai_proxy",
+                "canAutoConfigure": False,
+            })
+        elif isinstance(ol_probe, dict) and isinstance(ol_probe.get("models"), list):
+            detected.insert(0, {
+                "id": "custom_probed",
+                "name": label,
+                "status": "running",
+                "endpoint": base_u,
+                "modelsCount": len(ol_probe["models"]),
+                "detectedProtocol": "ollama",
+                "bestMethod": "in_app_and_bridge",
+                "canAutoConfigure": False,
+            })
+
+    return detected
+
+
+def auto_configure_mcp_app(app_id, api_key):
+    mcp_paths = _resolve_mcp_config_paths()
+    if app_id not in mcp_paths:
+        raise ValueError(f"Unsupported auto-config app: {app_id}")
+
+    cfg_path = mcp_paths[app_id]["config"]
+    os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+
+    existing = {}
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+            shutil.copyfile(cfg_path, f"{cfg_path}.cloudy.bak")
+        except Exception:
+            existing = {}
+
+    if not isinstance(existing, dict):
+        existing = {}
+    if not isinstance(existing.get("mcpServers"), dict):
+        existing["mcpServers"] = {}
+
+    mcp_script = os.path.abspath(os.path.join(BASE_DIR, "cloudy_mcp_server.py"))
+    py_cmd = sys.executable or "python3"
+
+    existing["mcpServers"]["cloudy-vault"] = {
+        "command": py_cmd,
+        "args": [mcp_script],
+        "env": {
+            "CLOUDY_API_KEY": api_key,
+            "CLOUDY_LOCAL_URL": "http://127.0.0.1:8765",
+            "CLOUDY_REMOTE_URL": CLOUD_ORIGIN,
+        },
+    }
+
+    save_json_atomic(cfg_path, existing)
+    return cfg_path
 
 
 def create_file_in_vault(key_obj, name, content_str, folder_id=None, mime="text/markdown", tags=None, b64=None, custom_id=None):
@@ -619,6 +968,24 @@ class CloudyOfflineHandler(BaseHTTPRequestHandler):
                 },
             )
 
+        # Scan installed & running AI apps on this computer/device
+        if p == "/api/v1/ai/scan-apps":
+            key_obj = self.authenticate(query, allow_default_local=True)
+            if not key_obj:
+                return self.send_json(401, {"ok": False, "error": "Invalid Cloudy AI API Key"})
+            c_name = query.get("customName", [""])[0]
+            c_url = query.get("customUrl", [""])[0]
+            apps = scan_ai_apps(c_name, c_url)
+            return self.send_json(
+                200,
+                {
+                    "ok": True,
+                    "bridge": True,
+                    "mcpScriptPath": os.path.abspath(os.path.join(BASE_DIR, "cloudy_mcp_server.py")),
+                    "apps": apps,
+                },
+            )
+
         key_obj = self.authenticate(query)
         if not key_obj:
             return self.send_json(401, {"ok": False, "error": "Invalid or missing Cloudy AI API Key"})
@@ -783,6 +1150,27 @@ class CloudyOfflineHandler(BaseHTTPRequestHandler):
                 )
             except Exception as exc:
                 return self.send_json(500, {"error": {"message": str(exc)}})
+
+        # 1-Click Auto-Configure MCP Desktop Apps (Cursor, Claude Desktop, Windsurf, LM Studio, AnythingLLM)
+        if p == "/api/v1/ai/auto-connect-app":
+            key_obj = self.authenticate(query, allow_default_local=True)
+            if not key_obj:
+                return self.send_json(401, {"ok": False, "error": "Invalid Cloudy AI API Key"})
+            try:
+                body = self.read_json_body()
+                app_id = str(body.get("appId") or "").strip()
+                cfg_path = auto_configure_mcp_app(app_id, key_obj["key"])
+                return self.send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "appId": app_id,
+                        "configPath": cfg_path,
+                        "message": f"Connected Cloudy Vault MCP into {cfg_path}",
+                    },
+                )
+            except Exception as exc:
+                return self.send_json(400, {"ok": False, "error": str(exc)})
 
         # 1-Click In-App Cloudy AI Chat Bridge (/api/v1/ai/local-chat)
         if p == "/api/v1/ai/local-chat":
