@@ -1,13 +1,15 @@
 import React, { useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
-import { Search, Wifi, WifiOff, X } from 'lucide-react';
+import { Search, Wifi, WifiOff, RefreshCw, X } from 'lucide-react';
 import { STUDIO_THEMES, type StudioTheme } from '../lib/theme';
 
 interface TopBarProps {
   searchQuery: string;
   onSearchChange: (q: string) => void;
   isOffline: boolean;
+  isSyncing: boolean;
   onToggleOffline: () => void;
+  onForceSync: () => void;
   pendingSyncCount: number;
   theme: StudioTheme;
   onChangeTheme: (theme: StudioTheme) => void;
@@ -17,7 +19,9 @@ export const TopBar: React.FC<TopBarProps> = ({
   searchQuery,
   onSearchChange,
   isOffline,
+  isSyncing,
   onToggleOffline,
+  onForceSync,
   pendingSyncCount,
   theme,
   onChangeTheme,
@@ -74,8 +78,8 @@ export const TopBar: React.FC<TopBarProps> = ({
         )}
       </div>
 
-      {/* Right Controls: Mobile Theme Dots + Sync Pill */}
-      <div className="flex items-center gap-2.5 shrink-0">
+      {/* Right Controls: Mobile Theme Dots + Live Auto-Sync Controls */}
+      <div className="flex items-center gap-2 shrink-0">
         <div className="flex lg:hidden items-center gap-1 bg-surface border border-line rounded-full px-2 py-1">
           {STUDIO_THEMES.map((t) => (
             <button
@@ -91,11 +95,25 @@ export const TopBar: React.FC<TopBarProps> = ({
           ))}
         </div>
 
+        {!isOffline && (
+          <motion.button
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.94 }}
+            onClick={onForceSync}
+            title="Live Auto-Sync active — click to sync immediately"
+            className="p-2 rounded-full bg-surface border border-line hover:border-line-strong text-ink-secondary hover:text-ink transition-colors shadow-card"
+          >
+            <RefreshCw
+              className={`w-3.5 h-3.5 ${isSyncing ? 'animate-spin text-accent' : ''}`}
+            />
+          </motion.button>
+        )}
+
         <motion.button
           whileHover={{ scale: 1.02 }}
           whileTap={{ scale: 0.97 }}
           onClick={onToggleOffline}
-          title="Toggle Online / Offline Vault Mode"
+          title="Toggle Online Auto-Sync / Offline Vault Mode"
           className={`px-3.5 py-1.5 rounded-full text-xs font-medium border flex items-center gap-2 transition-colors shadow-card ${
             isOffline
               ? 'bg-[#D97757]/15 border-[#D97757]/40 text-[#F0A085]'
@@ -122,7 +140,9 @@ export const TopBar: React.FC<TopBarProps> = ({
           ) : (
             <>
               <Wifi className="w-3.5 h-3.5 text-[#10A37F]" />
-              <span className="hidden sm:inline">Synced</span>
+              <span className="hidden sm:inline">
+                {isSyncing ? 'Syncing...' : 'Auto-Sync Live'}
+              </span>
             </>
           )}
         </motion.button>

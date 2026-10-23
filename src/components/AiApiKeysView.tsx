@@ -128,16 +128,21 @@ export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
 
   const ollamaSnippet = `import json, urllib.request
 
-# Works online (${origin}) OR offline (http://127.0.0.1:8765)
-CLOUDY_URL = "${origin}"
+# Auto-fallback: Online Cloud (${origin}) -> Local Auto-Sync Server (127.0.0.1:8765)
+URLS = ["${origin}", "http://127.0.0.1:8765"]
 API_KEY = "${activeKeyToken}"
 
 def cloudy(path):
-    req = urllib.request.Request(
-        f"{CLOUDY_URL}{path}",
-        headers={"Authorization": f"Bearer {API_KEY}"}
-    )
-    return json.loads(urllib.request.urlopen(req).read().decode())
+    for base in URLS:
+        try:
+            req = urllib.request.Request(
+                f"{base}{path}",
+                headers={"Authorization": f"Bearer {API_KEY}"}
+            )
+            return json.loads(urllib.request.urlopen(req, timeout=4).read().decode())
+        except Exception:
+            continue
+    raise RuntimeError("Offline AI Server not running")
 
 hits = cloudy("/api/v1/ai/search?q=Cloudy")["results"]
 context = "\\n\\n".join(
@@ -156,14 +161,17 @@ req = urllib.request.Request(
 )
 print(json.loads(urllib.request.urlopen(req).read().decode())["response"])`;
 
-  const curlSnippet = `# List accessible carpetas
+  const curlSnippet = `# List accessible carpetas (Online or Local 127.0.0.1:8765)
 curl -s "${origin}/api/v1/ai/folders" -H "Authorization: Bearer ${activeKeyToken}"
 
-# Search offline files
+# Search vault files
 curl -s "${origin}/api/v1/ai/search?q=Cloudy" -H "Authorization: Bearer ${activeKeyToken}"
 
-# Read file content
-curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Bearer ${activeKeyToken}"`;
+# Read file content skill
+curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Bearer ${activeKeyToken}"
+
+# Force instant sync on Local Offline AI Server when internet returns
+curl -s -X POST "http://127.0.0.1:8765/api/v1/ai/sync" -H "Authorization: Bearer ${activeKeyToken}"`;
 
   const codeToDisplay = snippetTab === 'ollama' ? ollamaSnippet : curlSnippet;
 
@@ -177,7 +185,7 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
               Local AI API Keys
             </h1>
             <p className="text-xs text-ink-secondary mt-1">
-              Scoped REST keys so local models (Ollama, DeepSeek, Qwen, llama.cpp) can read your files online or offline.
+              Scoped REST keys for local models (Ollama, DeepSeek, Qwen, llama.cpp) — works 100% offline & auto-syncs live whenever internet is available.
             </p>
           </div>
 
@@ -188,7 +196,7 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
             className="px-4 py-2.5 rounded-full bg-surface hover:bg-elevated border border-line-strong text-ink text-xs font-medium inline-flex items-center gap-2 shadow-card transition w-fit"
           >
             <Download className="w-4 h-4 text-accent" />
-            Offline AI Server (.zip)
+            Offline AI Server · Auto-Sync (.zip)
           </motion.a>
         </div>
 
@@ -397,6 +405,9 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
                 className="flex-1 px-3.5 py-2 rounded-2xl bg-canvas border border-line text-xs font-mono text-ink focus:outline-none"
               >
                 <option value="/api/v1/ai/status">GET /api/v1/ai/status</option>
+                <option value="/api/v1/ai/sync-manifest">
+                  GET /api/v1/ai/sync-manifest
+                </option>
                 <option value="/api/v1/ai/folders">GET /api/v1/ai/folders</option>
                 <option value="/api/v1/ai/files">GET /api/v1/ai/files</option>
                 <option value="/api/v1/ai/search?q=Cloudy">

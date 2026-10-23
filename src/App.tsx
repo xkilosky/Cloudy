@@ -33,6 +33,7 @@ import {
 } from './lib/theme';
 import {
   putStoreItem,
+  deleteStoreItem,
   saveOfflineBlob,
   getOfflineBlob,
   enqueueOfflineAction,
@@ -55,6 +56,7 @@ export function App() {
 
   const [simulatedOffline, setSimulatedOffline] = useState(false);
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
+  const [isSyncing, setIsSyncing] = useState(false);
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
 
   const [deferredPrompt, setDeferredPrompt] =
@@ -71,27 +73,39 @@ export function App() {
     applyStudioTheme(next);
   };
 
-  const showToast = (msg: string) => {
+  const showToast = useCallback((msg: string) => {
     setToast(msg);
     setTimeout(() => setToast((curr) => (curr === msg ? null : curr)), 3200);
-  };
+  }, []);
 
   const refreshVault = useCallback(
-    async (forceOfflineOverride?: boolean) => {
+    async (forceOfflineOverride?: boolean, silentBackground = false) => {
       try {
         const useOffline =
           forceOfflineOverride !== undefined
             ? forceOfflineOverride
             : simulatedOffline;
+        if (!useOffline && !silentBackground) {
+          setIsSyncing(true);
+        }
         const res = await syncVaultState(useOffline);
         setVault(res.state);
         setIsOffline(res.isOffline);
         setPendingSyncCount(res.pendingQueueCount);
+        if (res.flushedQueueCount > 0) {
+          showToast(
+            `Auto-synced ${res.flushedQueueCount} offline change${
+              res.flushedQueueCount === 1 ? '' : 's'
+            } to cloud`
+          );
+        }
       } catch (err) {
         console.error('Vault sync error:', err);
+      } finally {
+        setIsSyncing(false);
       }
     },
-    [simulatedOffline]
+    [simulatedOffline, showToast]
   );
 
   useEffect(() => {
@@ -102,12 +116,21 @@ export function App() {
     const handleOnline = () => {
       if (!simulatedOffline) {
         refreshVault(false);
-        showToast('Online — synced Offline Vault');
+        showToast('Internet connected — Live Auto-Sync active');
       }
     };
     const handleOffline = () => {
       setIsOffline(true);
-      showToast('Offline Vault active');
+      showToast('Offline Vault active — changes will auto-sync when online');
+    };
+    const handleFocusOrVisible = () => {
+      if (
+        !simulatedOffline &&
+        navigator.onLine &&
+        document.visibilityState === 'visible'
+      ) {
+        refreshVault(false, true);
+      }
     };
     const handleMessage = (event: MessageEvent) => {
       if (event.data?.type === 'CLOUDY_OAUTH_SUCCESS') {
@@ -124,6 +147,8 @@ export function App() {
 
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
+    window.addEventListener('focus', handleFocusOrVisible);
+    document.addEventListener('visibilitychange', handleFocusOrVisible);
     window.addEventListener('message', handleMessage);
     window.addEventListener('beforeinstallprompt', handleBeforeInstall);
 
@@ -134,10 +159,26 @@ export function App() {
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
+      window.removeEventListener('focus', handleFocusOrVisible);
+      document.removeEventListener('visibilitychange', handleFocusOrVisible);
       window.removeEventListener('message', handleMessage);
       window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
     };
-  }, [refreshVault, simulatedOffline]);
+  }, [refreshVault, simulatedOffline, showToast]);
+
+  // Live Background Auto-Sync loop whenever internet is available
+  useEffect(() => {
+    if (simulatedOffline) return;
+
+    const intervalMs = isOffline ? 8000 : 15000;
+    const timer = window.setInterval(() => {
+      if (!navigator.onLine) return;
+      if (!isOffline && document.visibilityState !== 'visible') return;
+      refreshVault(false, true);
+    }, intervalMs);
+
+    return () => window.clearInterval(timer);
+  }, [simulatedOffline, isOffline, refreshVault]);
 
   const handleToggleOffline = async () => {
     const next = !simulatedOffline;
@@ -406,7 +447,37 @@ export function App() {
     fileId: string,
     body: Record<string, unknown>
   ) => {
-    if (isOffline) return;
+    if (isOffline && vault) {
+      if (body.targetAccountId) {
+        showToast('Moving between cloud accounts requires internet');
+        return;
+      }
+      const existing = vault.files.find((f) => f.id === fileId);
+      if (!existing) return;
+      const now = new Date().toISOString();
+      const updated: FileItem = {
+        ...existing,
+        ...(typeof body.name === 'string' ? { name: body.name } : {}),
+        ...(body.folderId !== undefined
+          ? { folderId: (body.folderId as string | null) || null }
+          : {}),
+        ...(typeof body.trashed === 'boolean' ? { trashed: body.trashed } : {}),
+        ...(typeof body.starred === 'boolean' ? { starred: body.starred } : {}),
+        pendingOfflineSync: true,
+        updatedAt: now,
+      };
+      await putStoreItem('files', updated);
+      await enqueueOfflineAction({
+        id: `q_${Date.now()}_${fileId}`,
+        type: 'update_file',
+        payload: { fileId, ...body },
+        createdAt: now,
+      });
+      if (previewFile?.id === fileId) setPreviewFile(updated);
+      await refreshVault(true);
+      return;
+    }
+
     const res = await apiFetch(`/api/files/${fileId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -420,7 +491,22 @@ export function App() {
   };
 
   const handleTrashOrDeleteFile = async (file: FileItem, permanent = false) => {
-    if (isOffline) return;
+    if (isOffline) {
+      if (permanent) {
+        await deleteStoreItem('files', file.id);
+        await deleteStoreItem('blobs', file.id);
+        await enqueueOfflineAction({
+          id: `q_${Date.now()}_${file.id}`,
+          type: 'delete_file',
+          payload: { fileId: file.id },
+          createdAt: new Date().toISOString(),
+        });
+        await refreshVault(true);
+        return;
+      }
+      await handlePatchFile(file.id, { trashed: true });
+      return;
+    }
     if (permanent) {
       await apiFetch(`/api/files/${file.id}`, { method: 'DELETE' });
     } else {
@@ -433,7 +519,35 @@ export function App() {
     folder: FolderItem,
     permanent = false
   ) => {
-    if (isOffline) return;
+    if (isOffline && vault) {
+      const now = new Date().toISOString();
+      if (permanent) {
+        await deleteStoreItem('folders', folder.id);
+        await enqueueOfflineAction({
+          id: `q_${Date.now()}_${folder.id}`,
+          type: 'delete_folder',
+          payload: { folderId: folder.id },
+          createdAt: now,
+        });
+      } else {
+        const updated: FolderItem = {
+          ...folder,
+          trashed: true,
+          pendingOfflineSync: true,
+          updatedAt: now,
+        };
+        await putStoreItem('folders', updated);
+        await enqueueOfflineAction({
+          id: `q_${Date.now()}_${folder.id}`,
+          type: 'update_folder',
+          payload: { folderId: folder.id, trashed: true },
+          createdAt: now,
+        });
+      }
+      if (currentFolderId === folder.id) setCurrentFolderId(null);
+      await refreshVault(true);
+      return;
+    }
     if (permanent) {
       await apiFetch(`/api/folders/${folder.id}`, { method: 'DELETE' });
     } else {
@@ -448,7 +562,24 @@ export function App() {
   };
 
   const handleRestoreFolder = async (folder: FolderItem) => {
-    if (isOffline) return;
+    if (isOffline) {
+      const now = new Date().toISOString();
+      const updated: FolderItem = {
+        ...folder,
+        trashed: false,
+        pendingOfflineSync: true,
+        updatedAt: now,
+      };
+      await putStoreItem('folders', updated);
+      await enqueueOfflineAction({
+        id: `q_${Date.now()}_${folder.id}`,
+        type: 'update_folder',
+        payload: { folderId: folder.id, trashed: false },
+        createdAt: now,
+      });
+      await refreshVault(true);
+      return;
+    }
     await apiFetch(`/api/folders/${folder.id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -574,7 +705,12 @@ export function App() {
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
           isOffline={isOffline}
+          isSyncing={isSyncing}
           onToggleOffline={handleToggleOffline}
+          onForceSync={async () => {
+            await refreshVault(false);
+            showToast('Vault synced live');
+          }}
           pendingSyncCount={pendingSyncCount}
           theme={theme}
           onChangeTheme={handleChangeTheme}

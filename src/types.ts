@@ -128,7 +128,14 @@ export interface VaultState {
 
 export interface SyncQueueAction {
   id: string;
-  type: 'create_folder' | 'create_note' | 'update_file' | 'upload_file';
+  type:
+    | 'create_folder'
+    | 'update_folder'
+    | 'delete_folder'
+    | 'create_note'
+    | 'update_file'
+    | 'delete_file'
+    | 'upload_file';
   payload: Record<string, unknown>;
   blob?: Blob;
   createdAt: string;

@@ -183,10 +183,17 @@ async function handleOfflineAiApi(request, url) {
       const fileId = decodeURIComponent(contentMatch[1]);
       const file = visibleFiles.find((f) => f.id === fileId);
       if (!file) return jsonResponse({ error: 'File not found or not permitted for this API key' }, 404);
-      let content = file.textContent || '';
-      if (!content) {
+      let content = file.textContent;
+      if (content == null) {
         const blobRec = await getOneFromStore(db, 'blobs', fileId);
-        if (blobRec && blobRec.blob && (file.mimeType || '').startsWith('text/')) {
+        const mime = (file.mimeType || '').toLowerCase();
+        const isTxt =
+          mime.startsWith('text/') ||
+          mime.includes('json') ||
+          mime.includes('xml') ||
+          mime.includes('javascript') ||
+          /\.(md|txt|json|csv|ts|tsx|js|jsx|py|sh|yml|yaml|html|css|sql|xml|log)$/i.test(file.name || '');
+        if (blobRec && blobRec.blob && isTxt) {
           content = await blobRec.blob.text();
         }
       }
@@ -201,8 +208,35 @@ async function handleOfflineAiApi(request, url) {
           folderId: file.folderId,
           updatedAt: file.updatedAt,
         },
-        content,
+        content: content ?? '[Binary file — fetch /api/v1/ai/files/:id/raw for raw bytes]',
       });
+    }
+
+    const rawMatch = pathName.match(/^\/api\/v1\/ai\/files\/([^/]+)\/raw$/);
+    if (rawMatch) {
+      const fileId = decodeURIComponent(rawMatch[1]);
+      const file = visibleFiles.find((f) => f.id === fileId);
+      if (!file) return jsonResponse({ error: 'File not found or not permitted for this API key' }, 404);
+      const blobRec = await getOneFromStore(db, 'blobs', fileId);
+      if (blobRec && blobRec.blob) {
+        return new Response(blobRec.blob, {
+          status: 200,
+          headers: {
+            'Content-Type': file.mimeType || blobRec.blob.type || 'application/octet-stream',
+            'X-Cloudy-Runtime': 'service-worker-offline-vault',
+          },
+        });
+      }
+      if (typeof file.textContent === 'string') {
+        return new Response(file.textContent, {
+          status: 200,
+          headers: {
+            'Content-Type': file.mimeType || 'text/plain; charset=utf-8',
+            'X-Cloudy-Runtime': 'service-worker-offline-vault',
+          },
+        });
+      }
+      return jsonResponse({ error: 'Binary blob not cached offline yet' }, 404);
     }
 
     return jsonResponse({ error: 'Unknown AI API endpoint' }, 404);

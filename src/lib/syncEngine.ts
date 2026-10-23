@@ -8,6 +8,8 @@ import {
   getCachedBlobIds,
   getOfflineQueue,
   removeOfflineQueueItem,
+  getAllStoreItems,
+  putStoreItem,
 } from './offlineDb';
 
 const FORBIDDEN_MODES = new Set([
@@ -46,11 +48,17 @@ function sanitizeOfflineSnapshot(snap: VaultState): VaultState {
   };
 }
 
-export async function syncVaultState(forceOfflineMode: boolean): Promise<{
+export interface SyncVaultResult {
   state: VaultState;
   isOffline: boolean;
   pendingQueueCount: number;
-}> {
+  flushedQueueCount: number;
+  syncedAt: string | null;
+}
+
+let inFlightOnlineSync: Promise<SyncVaultResult> | null = null;
+
+export async function syncVaultState(forceOfflineMode: boolean): Promise<SyncVaultResult> {
   if (forceOfflineMode || (typeof navigator !== 'undefined' && !navigator.onLine)) {
     const offlineState = await loadOfflineSnapshot();
     const queue = await getOfflineQueue();
@@ -59,12 +67,30 @@ export async function syncVaultState(forceOfflineMode: boolean): Promise<{
         state: sanitizeOfflineSnapshot(offlineState),
         isOffline: true,
         pendingQueueCount: queue.length,
+        flushedQueueCount: 0,
+        syncedAt: null,
       };
     }
   }
 
+  // Deduplicate concurrent online sync calls so background auto-sync never double-replays queue items
+  if (inFlightOnlineSync) {
+    return inFlightOnlineSync;
+  }
+
+  inFlightOnlineSync = runOnlineSyncCycle().finally(() => {
+    inFlightOnlineSync = null;
+  });
+
+  return inFlightOnlineSync;
+}
+
+async function runOnlineSyncCycle(): Promise<SyncVaultResult> {
   try {
+    const localFilesBefore = await getAllStoreItems<FileItem>('files').catch(() => []);
     const queue = await getOfflineQueue();
+    let flushedQueueCount = 0;
+
     for (const action of queue) {
       try {
         let resp: Response | null = null;
@@ -73,6 +99,17 @@ export async function syncVaultState(forceOfflineMode: boolean): Promise<{
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(action.payload),
+          });
+        } else if (action.type === 'update_folder') {
+          const { folderId, ...rest } = action.payload;
+          resp = await apiFetch(`/api/folders/${folderId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(rest),
+          });
+        } else if (action.type === 'delete_folder') {
+          resp = await apiFetch(`/api/folders/${action.payload.folderId}`, {
+            method: 'DELETE',
           });
         } else if (action.type === 'create_note') {
           resp = await apiFetch('/api/files/note', {
@@ -86,6 +123,10 @@ export async function syncVaultState(forceOfflineMode: boolean): Promise<{
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(rest),
+          });
+        } else if (action.type === 'delete_file') {
+          resp = await apiFetch(`/api/files/${action.payload.fileId}`, {
+            method: 'DELETE',
           });
         } else if (action.type === 'upload_file' && action.blob) {
           const fd = new FormData();
@@ -103,17 +144,18 @@ export async function syncVaultState(forceOfflineMode: boolean): Promise<{
           resp = await apiFetch('/api/files/upload', { method: 'POST', body: fd });
         }
 
-        if (!resp || resp.ok) {
+        if (!resp || resp.ok || resp.status === 404) {
           await removeOfflineQueueItem(action.id);
+          flushedQueueCount += 1;
         } else {
-          // If no cloud account connected yet for binary upload, keep queued until user connects one
+          // Keep binary upload queued if user hasn't connected a real cloud account yet
           const body = await resp.json().catch(() => ({}));
           if (body?.code !== 'NO_CLOUD_ACCOUNT') {
             await removeOfflineQueueItem(action.id);
           }
         }
       } catch {
-        // Network error — retry next sync
+        // Transient network error — retry on next live auto-sync tick
       }
     }
 
@@ -121,20 +163,41 @@ export async function syncVaultState(forceOfflineMode: boolean): Promise<{
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = sanitizeOfflineSnapshot((await res.json()) as VaultState);
 
-    await persistSnapshotToOfflineVault(data);
+    const remainingQueue = await getOfflineQueue();
+    const pendingUploadIds = new Set(
+      remainingQueue
+        .filter((q) => q.type === 'upload_file' && q.payload?.id)
+        .map((q) => String(q.payload.id))
+    );
+
+    const serverFileIds = new Set(data.files.map((f) => f.id));
+    const preservedPendingFiles = localFilesBefore.filter(
+      (lf) => pendingUploadIds.has(lf.id) && !serverFileIds.has(lf.id)
+    );
+    const combinedFiles = [...preservedPendingFiles, ...data.files];
+
+    await persistSnapshotToOfflineVault({
+      ...data,
+      files: combinedFiles,
+    });
+    for (const pf of preservedPendingFiles) {
+      await putStoreItem('files', pf);
+    }
+
     await cacheOfflinePinnedBlobs(data.files);
 
     const cachedIds = await getCachedBlobIds();
-    const enrichedFiles = data.files.map((f) => ({
+    const enrichedFiles = combinedFiles.map((f) => ({
       ...f,
       offlineCached: cachedIds.has(f.id) || Boolean(f.textContent),
     }));
 
-    const remainingQueue = await getOfflineQueue();
     return {
       state: { ...data, files: enrichedFiles },
       isOffline: false,
       pendingQueueCount: remainingQueue.length,
+      flushedQueueCount,
+      syncedAt: new Date().toISOString(),
     };
   } catch {
     const fallback = await loadOfflineSnapshot();
@@ -144,6 +207,8 @@ export async function syncVaultState(forceOfflineMode: boolean): Promise<{
         state: sanitizeOfflineSnapshot(fallback),
         isOffline: true,
         pendingQueueCount: queue.length,
+        flushedQueueCount: 0,
+        syncedAt: null,
       };
     }
     throw new Error('Offline and no cached vault available.');
