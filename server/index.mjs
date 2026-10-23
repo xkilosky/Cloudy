@@ -5,10 +5,12 @@ import fs from 'fs';
 import {
   loadDb,
   ensureVaultLoaded,
+  flushPendingSaves,
   saveDb,
   selectTargetAccount,
   writeAccountBinary,
   readAccountBinary,
+  readOfflineVaultBinaryAsync,
   deleteAccountBinary,
   addVerifiedProviderAccount,
   isGenuineVerifiedAccount,
@@ -23,6 +25,7 @@ import {
   getProviderMeta,
   buildUpstreamOAuthUrl,
   exchangeOAuthCode,
+  peekOAuthStateVaultId,
 } from './providers.mjs';
 import {
   verifyAndInspectProvider,
@@ -64,7 +67,16 @@ function reqVaultId(req) {
 }
 
 // Auto-hydrate vault state from durable Supabase PostgreSQL on serverless cold starts
-app.use('/api', async (req, _res, next) => {
+// and flush any pending Supabase writes before serverless responses complete
+app.use('/api', async (req, res, next) => {
+  const origJson = res.json.bind(res);
+  res.json = (body) => {
+    flushPendingSaves()
+      .catch(() => {})
+      .finally(() => origJson(body));
+    return res;
+  };
+
   try {
     await ensureVaultLoaded(reqVaultId(req));
   } catch {
@@ -299,13 +311,19 @@ app.get('/api/oauth/callback', async (req, res) => {
       throw new Error(String(error_description || error));
     }
 
+    const targetVid = peekOAuthStateVaultId(String(state || ''));
+    const preDb = await ensureVaultLoaded(targetVid);
+
     const tokenBundle = await exchangeOAuthCode(
       String(state || ''),
       String(code || ''),
-      (pid) => getOAuthConfigForProvider(loadDb('default'), pid)
+      async (pid, vid) => {
+        const cfgDb = vid && vid !== preDb.vaultId ? await ensureVaultLoaded(vid) : preDb;
+        return getOAuthConfigForProvider(cfgDb, pid);
+      }
     );
 
-    const db = await ensureVaultLoaded(tokenBundle.vaultId || 'default');
+    const db = await ensureVaultLoaded(tokenBundle.vaultId || targetVid || 'default');
     const verified = await verifyAndInspectProvider(tokenBundle.providerId, tokenBundle);
     const account = addVerifiedProviderAccount(db, {
       providerId: tokenBundle.providerId,
@@ -318,6 +336,7 @@ app.get('/api/oauth/callback', async (req, res) => {
     });
 
     await importRemoteFilesIntoVault(db, account);
+    await flushPendingSaves();
 
     const safeJson = JSON.stringify(sanitizeAccount(account));
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -608,12 +627,35 @@ app.patch('/api/folders/:id', (req, res) => {
   if (!folder) return res.status(404).json({ ok: false, error: 'Folder not found' });
 
   const { name, parentId, offlinePinned, starred, trashed } = req.body || {};
+  const now = new Date().toISOString();
   if (typeof name === 'string' && name.trim()) folder.name = name.trim();
   if (parentId !== undefined && parentId !== folder.id) folder.parentId = parentId || null;
   if (typeof offlinePinned === 'boolean') folder.offlinePinned = offlinePinned;
   if (typeof starred === 'boolean') folder.starred = starred;
-  if (typeof trashed === 'boolean') folder.trashed = trashed;
-  folder.updatedAt = new Date().toISOString();
+  if (typeof trashed === 'boolean') {
+    folder.trashed = trashed;
+    // Cascade trash/restore state to descendant subfolders and files inside this carpeta
+    const affectedFolderIds = new Set([folder.id]);
+    let expanded = true;
+    while (expanded) {
+      expanded = false;
+      for (const sub of db.folders) {
+        if (sub.parentId && affectedFolderIds.has(sub.parentId) && !affectedFolderIds.has(sub.id)) {
+          affectedFolderIds.add(sub.id);
+          sub.trashed = trashed;
+          sub.updatedAt = now;
+          expanded = true;
+        }
+      }
+    }
+    for (const fl of db.files) {
+      if (fl.folderId && affectedFolderIds.has(fl.folderId)) {
+        fl.trashed = trashed;
+        fl.updatedAt = now;
+      }
+    }
+  }
+  folder.updatedAt = now;
 
   saveDb(db.vaultId);
   res.json({ ok: true, folder });
@@ -635,7 +677,7 @@ app.delete('/api/folders/:id', (req, res) => {
   }
   for (const file of db.files) {
     if (file.folderId && toDelete.has(file.folderId)) {
-      deleteAccountBinary(file.accountId, file.id, file.mirrorAccountId);
+      deleteAccountBinary(file.accountId, file.id, file.mirrorAccountId, db.vaultId);
     }
   }
   db.files = db.files.filter((fl) => !fl.folderId || !toDelete.has(fl.folderId));
@@ -778,7 +820,7 @@ app.post('/api/files/note', async (req, res) => {
       if (mirror) writeAccountBinary(mirror.id, id, buf);
     }
 
-    writeAccountBinary(targetAccountId, id, buf);
+    writeAccountBinary(targetAccountId, id, buf, db.vaultId, mimeType);
 
     const now = new Date().toISOString();
     const record = {
@@ -835,7 +877,7 @@ app.patch('/api/files/:id', async (req, res) => {
 
     if (typeof textContent === 'string') {
       const buf = Buffer.from(textContent, 'utf8');
-      writeAccountBinary(file.accountId, file.id, buf);
+      writeAccountBinary(file.accountId, file.id, buf, db.vaultId, file.mimeType || 'text/plain');
       file.textContent = textContent;
       file.size = buf.byteLength;
 
@@ -847,7 +889,8 @@ app.patch('/api/files/:id', async (req, res) => {
           buf,
           file.mimeType || 'text/plain',
           (pid) => getOAuthConfigForProvider(db, pid),
-          makeTokenUpdateHandler(db, owningAcc)
+          makeTokenUpdateHandler(db, owningAcc),
+          { remoteId: file.remoteId, remotePath: file.remotePath }
         );
         if (remoteMeta) {
           file.remoteId = remoteMeta.remoteId || file.remoteId;
@@ -861,6 +904,9 @@ app.patch('/api/files/:id', async (req, res) => {
       const nextAcc = db.accounts.find((a) => a.id === targetAccountId);
       if (nextAcc && isGenuineVerifiedAccount(nextAcc)) {
         let buf = readAccountBinary(file.accountId, file.id, file.mirrorAccountId);
+        if (!buf && (!file.accountId || file.accountId === 'offline_vault')) {
+          buf = await readOfflineVaultBinaryAsync(db.vaultId, file.id);
+        }
         if (!buf && typeof file.textContent === 'string') {
           buf = Buffer.from(file.textContent, 'utf8');
         }
@@ -887,7 +933,7 @@ app.patch('/api/files/:id', async (req, res) => {
           file.remoteId = remoteMeta?.remoteId || null;
           file.remotePath = remoteMeta?.remotePath || null;
           file.webUrl = remoteMeta?.webUrl || null;
-          writeAccountBinary(nextAcc.id, file.id, buf);
+          writeAccountBinary(nextAcc.id, file.id, buf, db.vaultId, file.mimeType);
         }
         file.accountId = nextAcc.id;
         file.providerId = nextAcc.providerId;
@@ -911,6 +957,9 @@ app.get('/api/files/:id/blob', async (req, res) => {
     if (!file) return res.status(404).json({ ok: false, error: 'File not found' });
 
     let buf = readAccountBinary(file.accountId, file.id, file.mirrorAccountId);
+    if (!buf && (!file.accountId || file.accountId === 'offline_vault')) {
+      buf = await readOfflineVaultBinaryAsync(db.vaultId, file.id);
+    }
     if (!buf && (file.remoteId || file.remotePath)) {
       const acc = db.accounts.find((a) => a.id === file.accountId);
       if (acc) {
@@ -921,7 +970,7 @@ app.get('/api/files/:id/blob', async (req, res) => {
           makeTokenUpdateHandler(db, acc)
         );
         if (buf) {
-          writeAccountBinary(file.accountId, file.id, buf);
+          writeAccountBinary(file.accountId, file.id, buf, db.vaultId, file.mimeType);
           if (!file.textContent && isLikelyTextMime(file.mimeType, file.name) && buf.byteLength <= 2 * 1024 * 1024) {
             file.textContent = buf.toString('utf8');
             saveDb(db.vaultId);
@@ -952,7 +1001,7 @@ app.delete('/api/files/:id', (req, res) => {
   const file = db.files.find((f) => f.id === req.params.id);
   if (!file) return res.status(404).json({ ok: false, error: 'File not found' });
 
-  deleteAccountBinary(file.accountId, file.id, file.mirrorAccountId);
+  deleteAccountBinary(file.accountId, file.id, file.mirrorAccountId, db.vaultId);
   db.files = db.files.filter((f) => f.id !== req.params.id);
   saveDb(db.vaultId);
   res.json({ ok: true });

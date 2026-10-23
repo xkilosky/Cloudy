@@ -84,6 +84,7 @@ export const DriveExplorer: React.FC<DriveExplorerProps> = ({
   onRestoreFolder,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const dragDepthRef = useRef(0);
   const [viewFilter, setViewFilter] = useState<'active' | 'trash'>('active');
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -148,6 +149,7 @@ export const DriveExplorer: React.FC<DriveExplorerProps> = ({
 
   const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault();
+    dragDepthRef.current = 0;
     setDragging(false);
     if (e.dataTransfer.files?.length) {
       setUploading(true);
@@ -180,12 +182,20 @@ export const DriveExplorer: React.FC<DriveExplorerProps> = ({
 
   return (
     <div
+      onDragEnter={(e) => {
+        e.preventDefault();
+        if (e.dataTransfer.types?.includes('Files')) {
+          dragDepthRef.current += 1;
+          setDragging(true);
+        }
+      }}
       onDragOver={(e) => {
         e.preventDefault();
-        setDragging(true);
       }}
       onDragLeave={(e) => {
-        if (e.currentTarget === e.target) setDragging(false);
+        e.preventDefault();
+        dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+        if (dragDepthRef.current === 0) setDragging(false);
       }}
       onDrop={handleDrop}
       className="relative flex-1 px-4 sm:px-8 py-7"

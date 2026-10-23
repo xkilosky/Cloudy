@@ -226,10 +226,16 @@ export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
     localModels.find((m) => m.uid === selectedModelUid) || localModels[0] || null;
 
   const handleAutoConnectApp = async (appId: string) => {
+    if (!selectedKeyObj) {
+      setAutoConnectBanner(
+        'Please create or resume an active AI API key under Keys & Permissions first.'
+      );
+      return;
+    }
     setAutoConnectingAppId(appId);
     setAutoConnectBanner(null);
     try {
-      const res = await autoConnectMcpAppViaBridge(appId, activeKeyToken);
+      const res = await autoConnectMcpAppViaBridge(appId, selectedKeyObj.key);
       setAutoConnectBanner(res.message);
     } catch (err) {
       setAutoConnectBanner(
@@ -260,6 +266,7 @@ export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
         vault,
         activeKey: selectedKeyObj,
         onSaveGeneratedNote,
+        onRefreshVault: onRefreshState,
       });
       setChatHistory([
         ...nextHistory,

@@ -191,7 +191,7 @@ export function App() {
     const clientFolderId = `fld_${Math.random().toString(36).slice(2, 11)}`;
     const now = new Date().toISOString();
 
-    if (isOffline && vault) {
+    const saveFolderOffline = async () => {
       const offlineFolder: FolderItem = {
         id: clientFolderId,
         name,
@@ -205,23 +205,36 @@ export function App() {
       };
       await putStoreItem('folders', offlineFolder);
       await enqueueOfflineAction({
-        id: `q_${Date.now()}`,
+        id: `q_${Date.now()}_${clientFolderId}`,
         type: 'create_folder',
         payload: { id: clientFolderId, name, parentId, offlinePinned: true },
         createdAt: now,
       });
       await refreshVault(true);
       showToast(`Created "${name}" offline`);
+    };
+
+    if (isOffline && vault) {
+      await saveFolderOffline();
       return;
     }
 
-    await apiFetch('/api/folders', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: clientFolderId, name, parentId }),
-    });
-    await refreshVault();
-    showToast(`Created "${name}"`);
+    try {
+      const res = await apiFetch('/api/folders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: clientFolderId, name, parentId }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.error || 'Failed to create folder');
+        return;
+      }
+      await refreshVault();
+      showToast(`Created "${name}"`);
+    } catch {
+      await saveFolderOffline();
+    }
   };
 
   const handleUploadFiles = async (
@@ -286,23 +299,27 @@ export function App() {
     for (const f of arr) fd.append('files', f);
     if (folderId) fd.append('folderId', folderId);
 
-    const res = await apiFetch('/api/files/upload', {
-      method: 'POST',
-      body: fd,
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      if (data.code === 'NO_CLOUD_ACCOUNT') {
-        showToast('Connect a real cloud storage account first to upload files');
-        setActiveTab('providers');
+    try {
+      const res = await apiFetch('/api/files/upload', {
+        method: 'POST',
+        body: fd,
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        if (data.code === 'NO_CLOUD_ACCOUNT') {
+          showToast('Connect a real cloud storage account first to upload files');
+          setActiveTab('providers');
+          return;
+        }
+        showToast(`Upload failed: ${data.error || 'Error'}`);
         return;
       }
-      showToast(`Upload failed: ${data.error || 'Error'}`);
-      return;
+      await refreshVault();
+      const dest = data.files?.[0]?.providerName || 'Cloud';
+      showToast(`Uploaded to ${dest}`);
+    } catch {
+      showToast('Network interrupted during upload — switch to Offline Vault or retry');
     }
-    await refreshVault();
-    const dest = data.files?.[0]?.providerName || 'Cloud';
-    showToast(`Uploaded to ${dest}`);
   };
 
   const handleCreateNote = async (
@@ -315,9 +332,9 @@ export function App() {
     const id = `fil_${Math.random().toString(36).slice(2, 11)}`;
     const now = new Date().toISOString();
 
-    if (isOffline && vault) {
+    const saveNoteOffline = async () => {
       const blob = new Blob([content], { type: mimeType });
-      const targetAcc = vault.accounts[0] || null;
+      const targetAcc = vault?.accounts[0] || null;
       const item: FileItem = {
         id,
         name,
@@ -349,21 +366,29 @@ export function App() {
       });
       await refreshVault(true);
       showToast(`Saved "${name}" offline`);
+    };
+
+    if (isOffline && vault) {
+      await saveNoteOffline();
       return;
     }
 
-    const res = await apiFetch('/api/files/note', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, name, content, mimeType, kind, folderId }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      showToast(`Save error: ${data.error || 'Error'}`);
-      return;
+    try {
+      const res = await apiFetch('/api/files/note', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, name, content, mimeType, kind, folderId }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        showToast(`Save error: ${data.error || 'Error'}`);
+        return;
+      }
+      await refreshVault();
+      showToast(`Saved "${name}" → ${data.file?.providerName || 'Vault'}`);
+    } catch {
+      await saveNoteOffline();
     }
-    await refreshVault();
-    showToast(`Saved "${name}" → ${data.file?.providerName || 'Vault'}`);
   };
 
   const handleSaveFileContent = async (file: FileItem, updatedText: string) => {
@@ -372,7 +397,7 @@ export function App() {
       type: file.mimeType || 'text/plain',
     });
 
-    if (isOffline) {
+    const saveEditOffline = async () => {
       const updated: FileItem = {
         ...file,
         textContent: updatedText,
@@ -391,20 +416,31 @@ export function App() {
       setPreviewFile(updated);
       await refreshVault(true);
       showToast('Saved offline');
+    };
+
+    if (isOffline) {
+      await saveEditOffline();
       return;
     }
 
-    const res = await apiFetch(`/api/files/${file.id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ textContent: updatedText }),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      await saveOfflineBlob(file.id, blob, data.file.updatedAt);
-      setPreviewFile(data.file);
-      await refreshVault();
-      showToast('Saved changes');
+    try {
+      const res = await apiFetch(`/api/files/${file.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ textContent: updatedText }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        await saveOfflineBlob(file.id, blob, data.file.updatedAt);
+        setPreviewFile(data.file);
+        await refreshVault();
+        showToast('Saved changes');
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showToast(`Save error: ${err.error || 'Failed to save'}`);
+      }
+    } catch {
+      await saveEditOffline();
     }
   };
 
@@ -447,7 +483,8 @@ export function App() {
     fileId: string,
     body: Record<string, unknown>
   ) => {
-    if (isOffline && vault) {
+    const patchFileOffline = async () => {
+      if (!vault) return;
       if (body.targetAccountId) {
         showToast('Moving between cloud accounts requires internet');
         return;
@@ -475,18 +512,29 @@ export function App() {
       });
       if (previewFile?.id === fileId) setPreviewFile(updated);
       await refreshVault(true);
+    };
+
+    if (isOffline && vault) {
+      await patchFileOffline();
       return;
     }
 
-    const res = await apiFetch(`/api/files/${fileId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      if (previewFile?.id === fileId) setPreviewFile(data.file);
-      await refreshVault();
+    try {
+      const res = await apiFetch(`/api/files/${fileId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (previewFile?.id === fileId) setPreviewFile(data.file);
+        await refreshVault();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        if (err.error) showToast(err.error);
+      }
+    } catch {
+      await patchFileOffline();
     }
   };
 
@@ -521,8 +569,28 @@ export function App() {
   ) => {
     if (isOffline && vault) {
       const now = new Date().toISOString();
+      const affectedIds = new Set<string>([folder.id]);
+      let expanded = true;
+      while (expanded) {
+        expanded = false;
+        for (const sub of vault.folders) {
+          if (sub.parentId && affectedIds.has(sub.parentId) && !affectedIds.has(sub.id)) {
+            affectedIds.add(sub.id);
+            expanded = true;
+          }
+        }
+      }
+
       if (permanent) {
-        await deleteStoreItem('folders', folder.id);
+        for (const fid of affectedIds) {
+          await deleteStoreItem('folders', fid);
+        }
+        for (const fl of vault.files) {
+          if (fl.folderId && affectedIds.has(fl.folderId)) {
+            await deleteStoreItem('files', fl.id);
+            await deleteStoreItem('blobs', fl.id);
+          }
+        }
         await enqueueOfflineAction({
           id: `q_${Date.now()}_${folder.id}`,
           type: 'delete_folder',
@@ -530,13 +598,26 @@ export function App() {
           createdAt: now,
         });
       } else {
-        const updated: FolderItem = {
-          ...folder,
-          trashed: true,
-          pendingOfflineSync: true,
-          updatedAt: now,
-        };
-        await putStoreItem('folders', updated);
+        for (const sub of vault.folders) {
+          if (affectedIds.has(sub.id)) {
+            await putStoreItem('folders', {
+              ...sub,
+              trashed: true,
+              pendingOfflineSync: true,
+              updatedAt: now,
+            });
+          }
+        }
+        for (const fl of vault.files) {
+          if (fl.folderId && affectedIds.has(fl.folderId)) {
+            await putStoreItem('files', {
+              ...fl,
+              trashed: true,
+              pendingOfflineSync: true,
+              updatedAt: now,
+            });
+          }
+        }
         await enqueueOfflineAction({
           id: `q_${Date.now()}_${folder.id}`,
           type: 'update_folder',
@@ -544,7 +625,7 @@ export function App() {
           createdAt: now,
         });
       }
-      if (currentFolderId === folder.id) setCurrentFolderId(null);
+      if (currentFolderId && affectedIds.has(currentFolderId)) setCurrentFolderId(null);
       await refreshVault(true);
       return;
     }
@@ -562,15 +643,39 @@ export function App() {
   };
 
   const handleRestoreFolder = async (folder: FolderItem) => {
-    if (isOffline) {
+    if (isOffline && vault) {
       const now = new Date().toISOString();
-      const updated: FolderItem = {
-        ...folder,
-        trashed: false,
-        pendingOfflineSync: true,
-        updatedAt: now,
-      };
-      await putStoreItem('folders', updated);
+      const affectedIds = new Set<string>([folder.id]);
+      let expanded = true;
+      while (expanded) {
+        expanded = false;
+        for (const sub of vault.folders) {
+          if (sub.parentId && affectedIds.has(sub.parentId) && !affectedIds.has(sub.id)) {
+            affectedIds.add(sub.id);
+            expanded = true;
+          }
+        }
+      }
+      for (const sub of vault.folders) {
+        if (affectedIds.has(sub.id)) {
+          await putStoreItem('folders', {
+            ...sub,
+            trashed: false,
+            pendingOfflineSync: true,
+            updatedAt: now,
+          });
+        }
+      }
+      for (const fl of vault.files) {
+        if (fl.folderId && affectedIds.has(fl.folderId)) {
+          await putStoreItem('files', {
+            ...fl,
+            trashed: false,
+            pendingOfflineSync: true,
+            updatedAt: now,
+          });
+        }
+      }
       await enqueueOfflineAction({
         id: `q_${Date.now()}_${folder.id}`,
         type: 'update_folder',

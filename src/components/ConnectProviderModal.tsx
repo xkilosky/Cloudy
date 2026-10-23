@@ -68,18 +68,37 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
     };
   }, []);
 
-  useEffect(() => {
+  const stopPolling = () => {
     if (pollTimerRef.current) {
       window.clearInterval(pollTimerRef.current);
       pollTimerRef.current = null;
     }
-    if (!provider) return;
+  };
+
+  const handleClose = () => {
+    stopPolling();
+    onClose();
+  };
+
+  useEffect(() => {
+    stopPolling();
     setErrorMsg(null);
     setLoading(false);
     setDeviceFlow(null);
     setNcPolling(false);
+    setNcCustom(false);
+    setNcServerUrl(provider?.defaultWebdavUrl || 'https://cloud.tab.digital');
     setShowMfa(false);
+    setEmail('');
+    setPassword('');
+    setMfaCode('');
     setSmartPayload('');
+    setS3Endpoint(provider?.defaultEndpoint || '');
+    setS3Bucket('');
+    setS3AccessKey('');
+    setS3SecretKey('');
+    setSbUrl('');
+    setSbKey('');
   }, [provider]);
 
   const isDeviceFlowProvider =
@@ -281,7 +300,7 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          onClick={onClose}
+          onClick={handleClose}
           className="fixed inset-0 z-50 bg-black/65 backdrop-blur-md flex items-center justify-center p-4"
         >
           <motion.div
@@ -303,7 +322,7 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
                 </h3>
               </div>
               <button
-                onClick={onClose}
+                onClick={handleClose}
                 className="p-1.5 rounded-full text-ink-muted hover:text-ink hover:bg-elevated transition"
               >
                 <X className="w-4 h-4" />

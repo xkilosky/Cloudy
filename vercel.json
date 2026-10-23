@@ -3,7 +3,7 @@
   "outputDirectory": "dist",
   "functions": {
     "api/index.mjs": {
-      "includeFiles": "{server/**,capacitor.config.json,android/**}"
+      "includeFiles": "{server/**,docs/**,capacitor.config.json,android/**}"
     }
   },
   "rewrites": [

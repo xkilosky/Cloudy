@@ -287,6 +287,15 @@ export function buildUpstreamOAuthUrl(
   return { authorizeUrl: url.toString(), state };
 }
 
+export function peekOAuthStateVaultId(stateStr) {
+  try {
+    const pending = decodeSignedState(stateStr);
+    return pending?.vid || 'default';
+  } catch {
+    return 'default';
+  }
+}
+
 export async function exchangeOAuthCode(stateStr, code, getOAuthConfig) {
   const pending = decodeSignedState(stateStr);
   if (!pending) {
@@ -294,7 +303,7 @@ export async function exchangeOAuthCode(stateStr, code, getOAuthConfig) {
   }
 
   const provider = getProviderMeta(pending.pid);
-  const fallbackCfg = getOAuthConfig ? getOAuthConfig(pending.pid) : null;
+  const fallbackCfg = getOAuthConfig ? await getOAuthConfig(pending.pid, pending.vid || 'default') : null;
   const clientId = pending.cid || fallbackCfg?.clientId;
   const clientSecret = pending.cs || fallbackCfg?.clientSecret || '';
 

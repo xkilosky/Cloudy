@@ -40,9 +40,23 @@ export function getSavedCustomLocalAiUrl(): string {
   }
 }
 
+export function normalizeLocalEndpointUrl(raw: string): string {
+  let u = (raw || '').trim();
+  if (!u) return '';
+  if (/^:?\d{2,5}$/.test(u)) {
+    return `http://127.0.0.1:${u.replace(/^:/, '')}`;
+  }
+  if (!/^https?:\/\//i.test(u)) {
+    u = `http://${u}`;
+  }
+  return u
+    .replace(/\/(v1\/chat\/completions|v1\/models|v1|api\/tags|api\/chat)\/*$/i, '')
+    .replace(/\/+$/, '');
+}
+
 export function saveCustomLocalAiUrl(url: string): void {
   try {
-    const trimmed = url.trim().replace(/\/+$/, '');
+    const trimmed = normalizeLocalEndpointUrl(url);
     if (trimmed) {
       localStorage.setItem(CUSTOM_URL_STORAGE_KEY, trimmed);
     } else {
@@ -125,9 +139,8 @@ export async function detectLocalAiRuntimes(
     { id: 'jan', name: 'Jan AI', base: 'http://127.0.0.1:1337', kind: 'openai' },
   ];
 
-  const cleanCustom = (customEndpoint || getSavedCustomLocalAiUrl()).trim().replace(/\/+$/, '');
-  if (cleanCustom) {
-    const cleanBase = cleanCustom.replace(/\/v1$/, '');
+  const cleanBase = normalizeLocalEndpointUrl(customEndpoint || getSavedCustomLocalAiUrl());
+  if (cleanBase) {
     directTargets.push({
       id: 'custom',
       name: 'Custom Local AI',
@@ -253,8 +266,9 @@ export async function askLocalAiWithVaultSkills(params: {
   vault: VaultState;
   activeKey: AiApiKey | null;
   onSaveGeneratedNote?: (name: string, content: string, folderId: string | null) => Promise<void>;
+  onRefreshVault?: () => Promise<void> | void;
 }): Promise<{ reply: string; usedSkills: SkillTraceItem[] }> {
-  const { selectedModel, messages, vault, activeKey, onSaveGeneratedNote } = params;
+  const { selectedModel, messages, vault, activeKey, onSaveGeneratedNote, onRefreshVault } = params;
 
   // Route 1: Via Cloudy Local Plug & Play Bridge (127.0.0.1:8765)
   if (selectedModel.viaBridge) {
@@ -273,6 +287,9 @@ export async function askLocalAiWithVaultSkills(params: {
     const data = await resp.json();
     if (!resp.ok || !data?.ok) {
       throw new Error(data?.error || 'Local AI Bridge chat request failed');
+    }
+    if (data.createdFile && onRefreshVault) {
+      await onRefreshVault();
     }
     return {
       reply: String(data.reply || ''),

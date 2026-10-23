@@ -27,6 +27,8 @@ const FORBIDDEN_MODES = new Set([
   'builtin_cloud',
 ]);
 
+const REMOTE_REFRESH_TTL_MS = process.env.VERCEL ? 2000 : 12000;
+
 export function makeId(prefix = 'id') {
   return `${prefix}_${crypto.randomBytes(6).toString('hex')}`;
 }
@@ -70,7 +72,6 @@ export function purgeFakeAccounts(db) {
       dirty = true;
       continue;
     }
-    // Fix legacy fabricated "<login>@github.com" strings on real GitHub accounts
     if (
       acc.providerId === 'github_vault' &&
       typeof acc.email === 'string' &&
@@ -98,7 +99,6 @@ export function purgeFakeAccounts(db) {
           dirty = true;
           continue;
         }
-        // Keep user notes/local files safely under Offline Vault rather than a fake cloud account
         if (f.accountId !== 'offline_vault' || f.providerName !== 'Offline Vault') {
           f.accountId = 'offline_vault';
           f.providerId = 'offline_vault';
@@ -150,7 +150,7 @@ Free Storage. One System. Your Rules.
 
 - **100% Real Cloud Accounts**: Open **Cloud Pool** to connect real storage accounts — GitHub Cloud, Microsoft OneDrive, MEGA (20 GB), pCloud (10 GB), Nextcloud, Google Drive (15 GB), Storj (25 GB), Cloudflare R2, Backblaze B2, Koofr, Box, Dropbox, or Supabase Storage.
 - **Online ↔ Offline**: Carpetas, notes, and pinned files sync automatically to your device's IndexedDB Offline Vault.
-- **Local AI API**: Open **Local AI API** to copy your \`cldy_sk_...\` key for Ollama, DeepSeek, Qwen, llama.cpp, or Python scripts.
+- **Local AI API**: Open **Local AI API** to connect local AI apps in 1 click or scan your device for installed AI apps.
 `;
 
   const buf = Buffer.from(quickstartMd, 'utf8');
@@ -165,7 +165,6 @@ Free Storage. One System. Your Rules.
       autoOfflineSync: true,
     },
     oauthApps: {},
-    // Zero fake or pre-created storage accounts — only real authenticated accounts appear here
     accounts: [],
     folders: [folderAi, folderDocs],
     files: [
@@ -208,7 +207,9 @@ Free Storage. One System. Your Rules.
 }
 
 const memoryVaults = new Map();
-const hydratedFromRemote = new Set();
+const hydratedAtMap = new Map();
+const pendingRemoteSaves = new Map();
+const pendingBinaryUploads = new Set();
 
 async function fetchRemoteVaultState(vaultId) {
   const sbUrl = process.env.CLOUDY_SUPABASE_URL;
@@ -235,28 +236,68 @@ async function fetchRemoteVaultState(vaultId) {
 function pushRemoteVaultState(vaultId, db) {
   const sbUrl = process.env.CLOUDY_SUPABASE_URL;
   const sbKey = process.env.CLOUDY_SUPABASE_SERVICE_KEY;
-  if (!sbUrl || !sbKey) return;
-  fetch(`${sbUrl}/rest/v1/cloudy_vault_states?on_conflict=vault_id`, {
-    method: 'POST',
-    headers: {
-      apikey: sbKey,
-      Authorization: `Bearer ${sbKey}`,
-      'Content-Type': 'application/json',
-      Prefer: 'resolution=merge-duplicates',
-    },
-    body: JSON.stringify({
-      vault_id: vaultId,
-      state_json: db,
-      updated_at: new Date().toISOString(),
-    }),
-  }).catch(() => {});
+  if (!sbUrl || !sbKey) return Promise.resolve();
+
+  const snapshotJson = JSON.stringify({
+    vault_id: vaultId,
+    state_json: db,
+    updated_at: new Date().toISOString(),
+  });
+
+  const prev = pendingRemoteSaves.get(vaultId) || Promise.resolve();
+  const nextPromise = prev
+    .catch(() => {})
+    .then(() =>
+      fetch(`${sbUrl}/rest/v1/cloudy_vault_states?on_conflict=vault_id`, {
+        method: 'POST',
+        headers: {
+          apikey: sbKey,
+          Authorization: `Bearer ${sbKey}`,
+          'Content-Type': 'application/json',
+          Prefer: 'resolution=merge-duplicates',
+        },
+        body: snapshotJson,
+      })
+    )
+    .catch(() => {})
+    .finally(() => {
+      if (pendingRemoteSaves.get(vaultId) === nextPromise) {
+        pendingRemoteSaves.delete(vaultId);
+      }
+      hydratedAtMap.set(vaultId, Date.now());
+    });
+
+  pendingRemoteSaves.set(vaultId, nextPromise);
+  return nextPromise;
+}
+
+/**
+ * Awaits all in-flight Supabase state & binary persistence operations before serverless functions freeze.
+ */
+export async function flushPendingSaves() {
+  const tasks = [
+    ...Array.from(pendingRemoteSaves.values()),
+    ...Array.from(pendingBinaryUploads.values()),
+  ];
+  if (tasks.length === 0) return;
+  await Promise.allSettled(tasks);
 }
 
 export async function ensureVaultLoaded(rawVaultId = 'default') {
   const vaultId = normalizeVaultId(rawVaultId);
-  if (!hydratedFromRemote.has(vaultId)) {
-    hydratedFromRemote.add(vaultId);
+  const inFlightSave = pendingRemoteSaves.get(vaultId);
+  if (inFlightSave) {
+    await inFlightSave;
+  }
+
+  const lastHydratedAt = hydratedAtMap.get(vaultId) || 0;
+  const shouldRefreshRemote =
+    Boolean(process.env.CLOUDY_SUPABASE_URL && process.env.CLOUDY_SUPABASE_SERVICE_KEY) &&
+    Date.now() - lastHydratedAt >= REMOTE_REFRESH_TTL_MS;
+
+  if (shouldRefreshRemote) {
     const remoteState = await fetchRemoteVaultState(vaultId);
+    hydratedAtMap.set(vaultId, Date.now());
     if (remoteState && Array.isArray(remoteState.accounts)) {
       const wasDirty = purgeFakeAccounts(remoteState);
       recalcAccountUsage(remoteState);
@@ -264,7 +305,7 @@ export async function ensureVaultLoaded(rawVaultId = 'default') {
       const vaultPath = path.join(VAULTS_DIR, `${vaultId}.json`);
       fs.writeFileSync(vaultPath, JSON.stringify(remoteState, null, 2), 'utf8');
       if (wasDirty) {
-        pushRemoteVaultState(vaultId, remoteState);
+        await pushRemoteVaultState(vaultId, remoteState);
       }
       return remoteState;
     }
@@ -306,12 +347,12 @@ export function loadDb(rawVaultId = 'default') {
 export function saveDb(rawVaultId = 'default') {
   const vaultId = normalizeVaultId(rawVaultId);
   const db = memoryVaults.get(vaultId);
-  if (!db) return;
+  if (!db) return Promise.resolve();
   purgeFakeAccounts(db);
   recalcAccountUsage(db);
   const vaultPath = path.join(VAULTS_DIR, `${vaultId}.json`);
   fs.writeFileSync(vaultPath, JSON.stringify(db, null, 2), 'utf8');
-  pushRemoteVaultState(vaultId, db);
+  return pushRemoteVaultState(vaultId, db);
 }
 
 export function findDbByApiKey(token) {
@@ -332,43 +373,51 @@ export function findDbByApiKey(token) {
 }
 
 export async function findDbByApiKeyAsync(token) {
-  const localHit = findDbByApiKey(token);
-  if (localHit) return localHit;
-
-  // Serverless cold-start lookup across durable Supabase PostgreSQL vaults
   const sbUrl = process.env.CLOUDY_SUPABASE_URL;
   const sbKey = process.env.CLOUDY_SUPABASE_SERVICE_KEY;
-  if (!sbUrl || !sbKey) return null;
 
-  try {
-    const res = await fetch(
-      `${sbUrl}/rest/v1/cloudy_vault_states?select=vault_id,state_json&limit=100`,
-      {
-        headers: {
-          apikey: sbKey,
-          Authorization: `Bearer ${sbKey}`,
-        },
-      }
-    );
-    if (!res.ok) return null;
-    const rows = await res.json();
-    for (const row of rows || []) {
-      const state = row.state_json;
-      if (!state?.apiKeys) continue;
-      const matched = state.apiKeys.find((k) => k.key === token && k.active !== false);
-      if (matched) {
-        const vid = normalizeVaultId(row.vault_id || state.vaultId);
-        purgeFakeAccounts(state);
-        recalcAccountUsage(state);
-        memoryVaults.set(vid, state);
-        hydratedFromRemote.add(vid);
-        return { db: state, matched };
-      }
+  // On serverless or after TTL expiry, check Supabase first so multi-instance updates are visible immediately
+  if (sbUrl && sbKey) {
+    const localCandidate = findDbByApiKey(token);
+    if (localCandidate) {
+      const vid = normalizeVaultId(localCandidate.db.vaultId);
+      const freshDb = await ensureVaultLoaded(vid);
+      const freshMatch = freshDb.apiKeys.find((k) => k.key === token && k.active !== false);
+      if (freshMatch) return { db: freshDb, matched: freshMatch };
     }
-  } catch {
-    // ignore network failure
+
+    try {
+      const res = await fetch(
+        `${sbUrl}/rest/v1/cloudy_vault_states?select=vault_id,state_json&limit=100`,
+        {
+          headers: {
+            apikey: sbKey,
+            Authorization: `Bearer ${sbKey}`,
+          },
+        }
+      );
+      if (res.ok) {
+        const rows = await res.json();
+        for (const row of rows || []) {
+          const state = row.state_json;
+          if (!state?.apiKeys) continue;
+          const matched = state.apiKeys.find((k) => k.key === token && k.active !== false);
+          if (matched) {
+            const vid = normalizeVaultId(row.vault_id || state.vaultId);
+            purgeFakeAccounts(state);
+            recalcAccountUsage(state);
+            memoryVaults.set(vid, state);
+            hydratedAtMap.set(vid, Date.now());
+            return { db: state, matched };
+          }
+        }
+      }
+    } catch {
+      // fall back to local memory/disk hit
+    }
   }
-  return null;
+
+  return findDbByApiKey(token);
 }
 
 export function recalcAccountUsage(db) {
@@ -449,12 +498,42 @@ export function selectTargetAccount(db, fileSize = 0, mimeType = '', preferredAc
   return { primary, mirror };
 }
 
-export function writeAccountBinary(accountId, fileId, buffer) {
+export function writeAccountBinary(accountId, fileId, buffer, vaultId = 'default', mimeType = 'application/octet-stream') {
   const safeAcc = accountId || 'offline_vault';
   const dir = path.join(MOUNTS_DIR, safeAcc);
   fs.mkdirSync(dir, { recursive: true });
   const filePath = path.join(dir, fileId);
   fs.writeFileSync(filePath, buffer);
+
+  // Durably back up offline_vault binary blobs to Supabase Storage bucket `cloudy-vault` for serverless cold starts
+  const sbUrl = process.env.CLOUDY_SUPABASE_URL;
+  const sbKey = process.env.CLOUDY_SUPABASE_SERVICE_KEY;
+  if (
+    safeAcc === 'offline_vault' &&
+    fileId !== 'fil_welcome' &&
+    sbUrl &&
+    sbKey &&
+    buffer.byteLength <= 25 * 1024 * 1024
+  ) {
+    const cleanVid = normalizeVaultId(vaultId);
+    const objKey = `offline_blobs/${cleanVid}/${encodeURIComponent(fileId)}`;
+    const p = fetch(`${sbUrl}/storage/v1/object/cloudy-vault/${objKey}`, {
+      method: 'POST',
+      headers: {
+        apikey: sbKey,
+        Authorization: `Bearer ${sbKey}`,
+        'Content-Type': mimeType || 'application/octet-stream',
+        'x-upsert': 'true',
+      },
+      body: buffer,
+    })
+      .catch(() => {})
+      .finally(() => {
+        pendingBinaryUploads.delete(p);
+      });
+    pendingBinaryUploads.add(p);
+  }
+
   return filePath;
 }
 
@@ -473,7 +552,31 @@ export function readAccountBinary(accountId, fileId, fallbackAccountId = null) {
   return null;
 }
 
-export function deleteAccountBinary(accountId, fileId, mirrorAccountId = null) {
+export async function readOfflineVaultBinaryAsync(vaultId, fileId) {
+  const local = readAccountBinary('offline_vault', fileId);
+  if (local) return local;
+  const sbUrl = process.env.CLOUDY_SUPABASE_URL;
+  const sbKey = process.env.CLOUDY_SUPABASE_SERVICE_KEY;
+  if (!sbUrl || !sbKey) return null;
+  try {
+    const cleanVid = normalizeVaultId(vaultId);
+    const objKey = `offline_blobs/${cleanVid}/${encodeURIComponent(fileId)}`;
+    const res = await fetch(`${sbUrl}/storage/v1/object/cloudy-vault/${objKey}`, {
+      headers: {
+        apikey: sbKey,
+        Authorization: `Bearer ${sbKey}`,
+      },
+    });
+    if (!res.ok) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    writeAccountBinary('offline_vault', fileId, buf);
+    return buf;
+  } catch {
+    return null;
+  }
+}
+
+export function deleteAccountBinary(accountId, fileId, mirrorAccountId = null, vaultId = 'default') {
   for (const accId of [accountId, mirrorAccountId]) {
     if (!accId) continue;
     const p = path.join(MOUNTS_DIR, accId, fileId);
@@ -484,6 +587,22 @@ export function deleteAccountBinary(accountId, fileId, mirrorAccountId = null) {
         // ignore
       }
     }
+  }
+  const sbUrl = process.env.CLOUDY_SUPABASE_URL;
+  const sbKey = process.env.CLOUDY_SUPABASE_SERVICE_KEY;
+  if ((!accountId || accountId === 'offline_vault') && sbUrl && sbKey) {
+    const cleanVid = normalizeVaultId(vaultId);
+    const objKey = `offline_blobs/${cleanVid}/${encodeURIComponent(fileId)}`;
+    const p = fetch(`${sbUrl}/storage/v1/object/cloudy-vault/${objKey}`, {
+      method: 'DELETE',
+      headers: {
+        apikey: sbKey,
+        Authorization: `Bearer ${sbKey}`,
+      },
+    })
+      .catch(() => {})
+      .finally(() => pendingBinaryUploads.delete(p));
+    pendingBinaryUploads.add(p);
   }
 }
 

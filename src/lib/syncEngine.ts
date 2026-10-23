@@ -1,4 +1,4 @@
-import type { VaultState, FileItem, StorageAccount } from '../types';
+import type { VaultState, FileItem, FolderItem, StorageAccount } from '../types';
 import { apiFetch } from './vaultClient';
 import {
   persistSnapshotToOfflineVault,
@@ -87,7 +87,10 @@ export async function syncVaultState(forceOfflineMode: boolean): Promise<SyncVau
 
 async function runOnlineSyncCycle(): Promise<SyncVaultResult> {
   try {
-    const localFilesBefore = await getAllStoreItems<FileItem>('files').catch(() => []);
+    const [localFilesBefore, localFoldersBefore] = await Promise.all([
+      getAllStoreItems<FileItem>('files').catch(() => []),
+      getAllStoreItems<FolderItem>('folders').catch(() => []),
+    ]);
     const queue = await getOfflineQueue();
     let flushedQueueCount = 0;
 
@@ -147,8 +150,9 @@ async function runOnlineSyncCycle(): Promise<SyncVaultResult> {
         if (!resp || resp.ok || resp.status === 404) {
           await removeOfflineQueueItem(action.id);
           flushedQueueCount += 1;
+        } else if (resp.status >= 500 || resp.status === 408 || resp.status === 429) {
+          // Transient server or rate-limit error — keep safely queued for next live auto-sync tick
         } else {
-          // Keep binary upload queued if user hasn't connected a real cloud account yet
           const body = await resp.json().catch(() => ({}));
           if (body?.code !== 'NO_CLOUD_ACCOUNT') {
             await removeOfflineQueueItem(action.id);
@@ -164,24 +168,39 @@ async function runOnlineSyncCycle(): Promise<SyncVaultResult> {
     const data = sanitizeOfflineSnapshot((await res.json()) as VaultState);
 
     const remainingQueue = await getOfflineQueue();
-    const pendingUploadIds = new Set(
+    const pendingFileIds = new Set(
       remainingQueue
-        .filter((q) => q.type === 'upload_file' && q.payload?.id)
+        .filter((q) => (q.type === 'upload_file' || q.type === 'create_note') && q.payload?.id)
+        .map((q) => String(q.payload.id))
+    );
+    const pendingFolderIds = new Set(
+      remainingQueue
+        .filter((q) => q.type === 'create_folder' && q.payload?.id)
         .map((q) => String(q.payload.id))
     );
 
     const serverFileIds = new Set(data.files.map((f) => f.id));
     const preservedPendingFiles = localFilesBefore.filter(
-      (lf) => pendingUploadIds.has(lf.id) && !serverFileIds.has(lf.id)
+      (lf) => pendingFileIds.has(lf.id) && !serverFileIds.has(lf.id)
     );
     const combinedFiles = [...preservedPendingFiles, ...data.files];
 
+    const serverFolderIds = new Set(data.folders.map((f) => f.id));
+    const preservedPendingFolders = localFoldersBefore.filter(
+      (fd) => pendingFolderIds.has(fd.id) && !serverFolderIds.has(fd.id)
+    );
+    const combinedFolders = [...preservedPendingFolders, ...data.folders];
+
     await persistSnapshotToOfflineVault({
       ...data,
+      folders: combinedFolders,
       files: combinedFiles,
     });
     for (const pf of preservedPendingFiles) {
       await putStoreItem('files', pf);
+    }
+    for (const pfd of preservedPendingFolders) {
+      await putStoreItem('folders', pfd);
     }
 
     await cacheOfflinePinnedBlobs(data.files);
@@ -193,7 +212,7 @@ async function runOnlineSyncCycle(): Promise<SyncVaultResult> {
     }));
 
     return {
-      state: { ...data, files: enrichedFiles },
+      state: { ...data, folders: combinedFolders, files: enrichedFiles },
       isOffline: false,
       pendingQueueCount: remainingQueue.length,
       flushedQueueCount,

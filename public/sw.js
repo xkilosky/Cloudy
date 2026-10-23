@@ -1,5 +1,5 @@
 /* Cloudy by X-Kilo — Offline Service Worker + Local IndexedDB AI REST Fallback */
-const CACHE_NAME = 'cloudy-xkilo-v1';
+const CACHE_NAME = 'cloudy-xkilo-v2';
 const PRECACHE_ASSETS = /* __CLOUDY_PRECACHE_MANIFEST__ */ [
   '/',
   '/index.html',
@@ -67,6 +67,7 @@ function jsonResponse(body, status = 200) {
     status,
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
+      'Access-Control-Allow-Origin': '*',
       'X-Cloudy-Runtime': 'service-worker-offline-vault',
     },
   });
@@ -82,7 +83,7 @@ async function handleOfflineAiApi(request, url) {
 
     if (!token) {
       return jsonResponse(
-        { error: 'Missing Cloudy AI API key. Pass Authorization: Bearer cldy_sk_...' },
+        { ok: false, error: 'Missing Cloudy AI API key. Pass Authorization: Bearer cldy_sk_...' },
         401
       );
     }
@@ -92,7 +93,7 @@ async function handleOfflineAiApi(request, url) {
     const matchedKey = keys.find((k) => k.key === token && k.active !== false);
 
     if (!matchedKey) {
-      return jsonResponse({ error: 'Invalid or revoked Cloudy AI API key.' }, 403);
+      return jsonResponse({ ok: false, error: 'Invalid or revoked Cloudy AI API key.' }, 403);
     }
 
     const folders = (await getAllFromStore(db, 'folders')).filter((f) => !f.trashed);
@@ -146,7 +147,7 @@ async function handleOfflineAiApi(request, url) {
     if (pathName === '/api/v1/ai/files') {
       const folderId = url.searchParams.get('folderId');
       const filtered = folderId
-        ? visibleFiles.filter((f) => f.folderId === folderId)
+        ? visibleFiles.filter((f) => (folderId === 'root' ? !f.folderId : f.folderId === folderId))
         : visibleFiles;
       return jsonResponse({
         ok: true,
@@ -158,14 +159,12 @@ async function handleOfflineAiApi(request, url) {
 
     if (pathName === '/api/v1/ai/search') {
       const q = (url.searchParams.get('q') || '').toLowerCase().trim();
+      const terms = q.split(/\s+/).filter(Boolean);
       const hits = visibleFiles
         .filter((f) => {
-          if (!q) return true;
-          return (
-            (f.name || '').toLowerCase().includes(q) ||
-            (f.textContent || '').toLowerCase().includes(q) ||
-            (f.tags || []).some((t) => t.toLowerCase().includes(q))
-          );
+          if (terms.length === 0) return true;
+          const hay = `${f.name || ''} ${f.textContent || ''} ${(f.tags || []).join(' ')}`.toLowerCase();
+          return terms.some((t) => hay.includes(t));
         })
         .map((f) => ({
           id: f.id,
@@ -174,6 +173,7 @@ async function handleOfflineAiApi(request, url) {
           mimeType: f.mimeType,
           size: f.size,
           snippet: (f.textContent || '').slice(0, 500),
+          readUrl: `/api/v1/ai/files/${f.id}/content`,
         }));
       return jsonResponse({ ok: true, mode: 'offline-vault-sw', query: q, count: hits.length, results: hits });
     }
@@ -182,7 +182,7 @@ async function handleOfflineAiApi(request, url) {
     if (contentMatch) {
       const fileId = decodeURIComponent(contentMatch[1]);
       const file = visibleFiles.find((f) => f.id === fileId);
-      if (!file) return jsonResponse({ error: 'File not found or not permitted for this API key' }, 404);
+      if (!file) return jsonResponse({ ok: false, error: 'File not found or not permitted for this API key' }, 404);
       let content = file.textContent;
       if (content == null) {
         const blobRec = await getOneFromStore(db, 'blobs', fileId);
@@ -192,7 +192,10 @@ async function handleOfflineAiApi(request, url) {
           mime.includes('json') ||
           mime.includes('xml') ||
           mime.includes('javascript') ||
-          /\.(md|txt|json|csv|ts|tsx|js|jsx|py|sh|yml|yaml|html|css|sql|xml|log)$/i.test(file.name || '');
+          mime.includes('typescript') ||
+          mime.includes('yaml') ||
+          mime.includes('csv') ||
+          /\.(md|txt|json|csv|ts|tsx|js|jsx|py|sh|yml|yaml|html|css|sql|xml|log|ini|env)$/i.test(file.name || '');
         if (blobRec && blobRec.blob && isTxt) {
           content = await blobRec.blob.text();
         }
@@ -216,7 +219,7 @@ async function handleOfflineAiApi(request, url) {
     if (rawMatch) {
       const fileId = decodeURIComponent(rawMatch[1]);
       const file = visibleFiles.find((f) => f.id === fileId);
-      if (!file) return jsonResponse({ error: 'File not found or not permitted for this API key' }, 404);
+      if (!file) return jsonResponse({ ok: false, error: 'File not found or not permitted for this API key' }, 404);
       const blobRec = await getOneFromStore(db, 'blobs', fileId);
       if (blobRec && blobRec.blob) {
         return new Response(blobRec.blob, {
@@ -236,12 +239,12 @@ async function handleOfflineAiApi(request, url) {
           },
         });
       }
-      return jsonResponse({ error: 'Binary blob not cached offline yet' }, 404);
+      return jsonResponse({ ok: false, error: 'Binary blob not cached offline yet' }, 404);
     }
 
-    return jsonResponse({ error: 'Unknown AI API endpoint' }, 404);
+    return jsonResponse({ ok: false, error: 'Unknown AI API endpoint' }, 404);
   } catch (err) {
-    return jsonResponse({ error: 'Offline vault read error', detail: String(err) }, 500);
+    return jsonResponse({ ok: false, error: 'Offline vault read error', detail: String(err) }, 500);
   }
 }
 
@@ -269,8 +272,36 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Static & SPA navigation requests: Stale-While-Revalidate / Cache-Fallback
   if (request.method === 'GET') {
+    const isNavigation =
+      request.mode === 'navigate' ||
+      url.pathname === '/' ||
+      url.pathname === '/index.html';
+
+    // Network-First for HTML navigation so new deployments load immediately, with instant Offline Cache fallback
+    if (isNavigation) {
+      event.respondWith(
+        fetch(request)
+          .then((response) => {
+            if (response && response.status === 200 && response.type === 'basic') {
+              const clone = response.clone();
+              caches.open(CACHE_NAME).then((cache) => cache.put('/index.html', clone));
+            }
+            return response;
+          })
+          .catch(async () => {
+            return (
+              (await caches.match(request)) ||
+              (await caches.match('/index.html')) ||
+              (await caches.match('/')) ||
+              new Response('Offline', { status: 503 })
+            );
+          })
+      );
+      return;
+    }
+
+    // Cache-First with background refresh for hashed static assets & icons
     event.respondWith(
       caches.match(request).then((cached) => {
         const networkFetch = fetch(request)
@@ -281,13 +312,7 @@ self.addEventListener('fetch', (event) => {
             }
             return response;
           })
-          .catch(() => {
-            if (cached) return cached;
-            if (request.mode === 'navigate') {
-              return caches.match('/index.html');
-            }
-            return new Response('Offline', { status: 503 });
-          });
+          .catch(() => cached || new Response('Offline', { status: 503 }));
 
         return cached || networkFetch;
       })

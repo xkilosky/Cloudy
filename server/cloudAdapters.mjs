@@ -775,7 +775,8 @@ export async function uploadFileToRemoteProvider(
   buffer,
   mimeType,
   getOAuthConfig,
-  onTokensUpdated
+  onTokensUpdated,
+  existingRemote = null
 ) {
   const providerId = account.providerId;
   if (providerId === 'xkilo_core') return null;
@@ -785,6 +786,27 @@ export async function uploadFileToRemoteProvider(
 
   if (providerId === 'google_drive') {
     const token = await getValidOAuthToken(account, getOAuthConfig, onTokensUpdated);
+    if (existingRemote?.remoteId) {
+      const patchRes = await fetch(
+        `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(existingRemote.remoteId)}?uploadType=media&fields=id,name,webViewLink`,
+        {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': mimeType || 'application/octet-stream',
+          },
+          body: buffer,
+        }
+      );
+      if (patchRes.ok) {
+        const out = await patchRes.json();
+        return { remoteId: out.id, remotePath: out.name || safeName, webUrl: out.webViewLink || null };
+      }
+      if (patchRes.status !== 404) {
+        throw new Error(`Google Drive update failed (${patchRes.status}): ${await patchRes.text()}`);
+      }
+    }
+
     const boundary = `cloudy_${crypto.randomBytes(8).toString('hex')}`;
     const meta = JSON.stringify({ name: safeName, mimeType });
     const multipartBody = Buffer.concat([
@@ -814,13 +836,17 @@ export async function uploadFileToRemoteProvider(
 
   if (providerId === 'dropbox') {
     const token = await getValidOAuthToken(account, getOAuthConfig, onTokensUpdated);
-    const remotePath = `/Cloudy/${Date.now()}_${safeName}`;
+    const remotePath = existingRemote?.remotePath || `/Cloudy/${Date.now()}_${safeName}`;
     const res = await fetch('https://content.dropboxapi.com/2/files/upload', {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/octet-stream',
-        'Dropbox-API-Arg': JSON.stringify({ path: remotePath, mode: 'overwrite', autorename: true }),
+        'Dropbox-API-Arg': JSON.stringify({
+          path: remotePath,
+          mode: 'overwrite',
+          autorename: !existingRemote?.remotePath,
+        }),
       },
       body: buffer,
     });
@@ -831,7 +857,7 @@ export async function uploadFileToRemoteProvider(
 
   if (providerId === 'onedrive') {
     const token = await getValidOAuthToken(account, getOAuthConfig, onTokensUpdated);
-    const remotePath = `Cloudy/${Date.now()}_${safeName}`;
+    const remotePath = existingRemote?.remotePath || `Cloudy/${Date.now()}_${safeName}`;
     const res = await fetch(
       `https://graph.microsoft.com/v1.0/me/drive/root:/${encodeURI(remotePath)}:/content`,
       {
@@ -847,6 +873,24 @@ export async function uploadFileToRemoteProvider(
 
   if (providerId === 'box') {
     const token = await getValidOAuthToken(account, getOAuthConfig, onTokensUpdated);
+    if (existingRemote?.remoteId) {
+      const fd = new FormData();
+      fd.append('attributes', JSON.stringify({ name: safeName }));
+      fd.append('file', new Blob([buffer], { type: mimeType }), safeName);
+      const updRes = await fetch(
+        `https://upload.box.com/api/2.0/files/${encodeURIComponent(existingRemote.remoteId)}/content`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+          body: fd,
+        }
+      );
+      if (updRes.ok) {
+        const out = await updRes.json();
+        const entry = out.entries?.[0];
+        return { remoteId: entry?.id || existingRemote.remoteId, remotePath: entry?.name || safeName };
+      }
+    }
     const fd = new FormData();
     fd.append('attributes', JSON.stringify({ name: `${Date.now()}_${safeName}`, parent: { id: '0' } }));
     fd.append('file', new Blob([buffer], { type: mimeType }), safeName);
@@ -879,23 +923,48 @@ export async function uploadFileToRemoteProvider(
   }
 
   if (providerId === 'github_vault') {
-    const remotePath = `cloudy/${Date.now()}_${safeName}`;
-    const res = await fetch(
-      `https://api.github.com/repos/${creds.owner}/${creds.repo}/contents/${encodeURI(remotePath)}`,
-      {
-        method: 'PUT',
-        headers: {
-          Authorization: `Bearer ${creds.accessToken}`,
-          Accept: 'application/vnd.github+json',
-          'User-Agent': 'Cloudy-XKilo-Vault',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          message: `Upload ${safeName} via Cloudy`,
-          content: buffer.toString('base64'),
-        }),
+    const remotePath = existingRemote?.remotePath || `cloudy/${Date.now()}_${safeName}`;
+    const ghHeaders = {
+      Authorization: `Bearer ${creds.accessToken}`,
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'Cloudy-XKilo-Vault',
+      'Content-Type': 'application/json',
+    };
+    const encodedPath = remotePath.split('/').map(encodeURIComponent).join('/');
+    const apiUrl = `https://api.github.com/repos/${creds.owner}/${creds.repo}/contents/${encodedPath}`;
+
+    const putPayload = {
+      message: existingRemote?.remotePath
+        ? `Update ${safeName} via Cloudy`
+        : `Upload ${safeName} via Cloudy`,
+      content: buffer.toString('base64'),
+    };
+    if (existingRemote?.remoteId) {
+      putPayload.sha = existingRemote.remoteId;
+    }
+
+    let res = await fetch(apiUrl, {
+      method: 'PUT',
+      headers: ghHeaders,
+      body: JSON.stringify(putPayload),
+    });
+
+    // Self-heal stale or missing GitHub blob SHA on existing files
+    if (!res.ok && (res.status === 409 || res.status === 422)) {
+      const metaRes = await fetch(apiUrl, { headers: ghHeaders }).catch(() => null);
+      if (metaRes?.ok) {
+        const metaJson = await metaRes.json();
+        if (metaJson?.sha) {
+          putPayload.sha = metaJson.sha;
+          res = await fetch(apiUrl, {
+            method: 'PUT',
+            headers: ghHeaders,
+            body: JSON.stringify(putPayload),
+          });
+        }
       }
-    );
+    }
+
     if (!res.ok) throw new Error(`GitHub upload failed (${res.status}): ${await res.text()}`);
     const out = await res.json();
     return {
@@ -922,7 +991,7 @@ export async function uploadFileToRemoteProvider(
   }
 
   if (['cloudflare_r2', 'backblaze_b2', 'storj'].includes(providerId)) {
-    const key = `cloudy/${Date.now()}_${safeName}`;
+    const key = existingRemote?.remotePath || `cloudy/${Date.now()}_${safeName}`;
     const res = await s3SignedFetch({
       ...creds,
       key,
@@ -936,8 +1005,9 @@ export async function uploadFileToRemoteProvider(
 
   if (['koofr', 'yandex_disk', 'nextcloud'].includes(providerId)) {
     const basic = Buffer.from(`${creds.username}:${creds.password}`).toString('base64');
-    const remotePath = `Cloudy_${Date.now()}_${safeName}`;
-    const res = await fetch(`${creds.webdavUrl}/${encodeURIComponent(remotePath)}`, {
+    const remotePath = existingRemote?.remotePath || `Cloudy_${Date.now()}_${safeName}`;
+    const encodedPath = remotePath.replace(/^\/+/, '').split('/').map(encodeURIComponent).join('/');
+    const res = await fetch(`${creds.webdavUrl}/${encodedPath}`, {
       method: 'PUT',
       headers: { Authorization: `Basic ${basic}`, 'Content-Type': mimeType },
       body: buffer,
@@ -950,7 +1020,7 @@ export async function uploadFileToRemoteProvider(
 
   if (providerId === 'supabase_storage') {
     const prefix = creds.keyPrefix || '';
-    const remotePath = `${prefix}files/${Date.now()}_${safeName}`;
+    const remotePath = existingRemote?.remotePath || `${prefix}files/${Date.now()}_${safeName}`;
     const res = await fetch(
       `${creds.projectUrl}/storage/v1/object/${creds.bucket}/${encodeURI(remotePath)}`,
       {
@@ -1081,7 +1151,12 @@ export async function downloadFileFromRemoteProvider(
 
   if (['koofr', 'yandex_disk', 'nextcloud'].includes(providerId)) {
     const basic = Buffer.from(`${creds.username}:${creds.password}`).toString('base64');
-    const res = await fetch(`${creds.webdavUrl}/${encodeURIComponent(remotePath || remoteId)}`, {
+    const encodedPath = String(remotePath || remoteId)
+      .replace(/^\/+/, '')
+      .split('/')
+      .map(encodeURIComponent)
+      .join('/');
+    const res = await fetch(`${creds.webdavUrl}/${encodedPath}`, {
       headers: { Authorization: `Basic ${basic}` },
     });
     if (!res.ok) return null;
@@ -1312,6 +1387,34 @@ export async function listRemoteProviderFiles(account, getOAuthConfig, onTokensU
       });
     }
     return items.slice(0, 60);
+  }
+
+  if (providerId === 'supabase_storage') {
+    const res = await fetch(
+      `${creds.projectUrl}/storage/v1/object/list/${encodeURIComponent(creds.bucket)}`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${creds.apiKey}`,
+          apikey: creds.apiKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ prefix: 'files', limit: 60, offset: 0 }),
+      }
+    );
+    if (!res.ok) return [];
+    const list = await res.json();
+    if (!Array.isArray(list)) return [];
+    return list
+      .filter((item) => item?.name && item?.id)
+      .map((item) => ({
+        remoteId: `files/${item.name}`,
+        remotePath: `files/${item.name}`,
+        name: item.name,
+        mimeType: item.metadata?.mimetype || 'application/octet-stream',
+        size: Number(item.metadata?.size || 0),
+        updatedAt: item.updated_at || new Date().toISOString(),
+      }));
   }
 
   return [];

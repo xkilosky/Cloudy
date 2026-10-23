@@ -199,6 +199,18 @@ def discover_local_ai_models():
     return runtimes, models
 
 
+def _normalize_local_url(raw_url):
+    u = str(raw_url or "").strip()
+    if not u:
+        return ""
+    if re.fullmatch(r":?\\d{2,5}", u):
+        return f"http://127.0.0.1:{u.lstrip(':')}"
+    if not re.match(r"^https?://", u, re.IGNORECASE):
+        u = f"http://{u}"
+    u = re.sub(r"/(v1/chat/completions|v1/models|v1|api/tags|api/chat)/*$", "", u, flags=re.IGNORECASE)
+    return u.rstrip("/")
+
+
 def _probe_json(url, timeout=1.2):
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Cloudy-App-Scanner/3.0"})
@@ -476,8 +488,8 @@ def scan_ai_apps(custom_name="", custom_url=""):
             })
 
     # 9. Custom user-specified app / URL probe (e.g. app named "Local")
-    if custom_url:
-        base_u = custom_url.strip().rstrip("/").replace("/v1", "")
+    base_u = _normalize_local_url(custom_url)
+    if base_u:
         v1_probe = _probe_json(f"{base_u}/v1/models")
         ol_probe = _probe_json(f"{base_u}/api/tags")
         label = (custom_name or "Custom Local AI App").strip()
@@ -924,8 +936,8 @@ class CloudyOfflineHandler(BaseHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed.query)
         p = parsed.path
 
-        # OpenAI-compatible Plug & Play model list (/v1/models)
-        if p == "/v1/models":
+        # OpenAI-compatible Plug & Play model list (/v1/models and /models)
+        if p in ("/v1/models", "/models"):
             key_obj = self.authenticate(query, allow_default_local=True)
             if not key_obj:
                 return self.send_json(401, {"error": {"message": "Invalid Cloudy API Key"}})
@@ -1121,29 +1133,81 @@ class CloudyOfflineHandler(BaseHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed.query)
         p = parsed.path
 
-        # OpenAI-compatible Plug & Play Chat Completions (/v1/chat/completions)
-        if p == "/v1/chat/completions":
+        # OpenAI-compatible Plug & Play Chat Completions (/v1/chat/completions and /chat/completions)
+        if p in ("/v1/chat/completions", "/chat/completions"):
             key_obj = self.authenticate(query, allow_default_local=True)
             if not key_obj:
                 return self.send_json(401, {"error": {"message": "Invalid Cloudy API Key"}})
             try:
                 body = self.read_json_body()
                 req_model = body.get("model") or ""
+                want_stream = bool(body.get("stream"))
                 messages = list(body.get("messages") or [])
                 _, discovered = discover_local_ai_models()
                 chosen = next((m for m in discovered if m["id"] == req_model), discovered[0] if discovered else None)
                 if not chosen:
                     return self.send_json(400, {"error": {"message": "No local AI runtime (Ollama / LM Studio / llama.cpp) running on 127.0.0.1"}})
-                last_user = next((m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), "")
+                last_user = next(
+                    (
+                        m.get("content", "") if isinstance(m.get("content"), str) else json.dumps(m.get("content"))
+                        for m in reversed(messages)
+                        if m.get("role") == "user"
+                    ),
+                    "",
+                )
                 sys_ctx, _ = build_vault_skill_context(key_obj, last_user)
                 augmented = [{"role": "system", "content": sys_ctx}] + messages
                 reply = call_local_llm(chosen["endpoint"], chosen["kind"], chosen["id"], augmented)
+
+                if key_obj.get("scope") == "read_write":
+                    match = re.search(r'<cloudy_write\\s+name="([^"]+)"\\s*>([\\s\\S]*?)</cloudy_write>', reply)
+                    if match:
+                        create_file_in_vault(key_obj, match.group(1).strip(), match.group(2).strip(), body.get("folderId"))
+
+                cmpl_id = f"chatcmpl_{secrets.token_hex(8)}"
+                created_ts = int(time.time())
+
+                if want_stream:
+                    chunks = [
+                        {
+                            "id": cmpl_id,
+                            "object": "chat.completion.chunk",
+                            "created": created_ts,
+                            "model": chosen["id"],
+                            "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+                        },
+                        {
+                            "id": cmpl_id,
+                            "object": "chat.completion.chunk",
+                            "created": created_ts,
+                            "model": chosen["id"],
+                            "choices": [{"index": 0, "delta": {"content": reply}, "finish_reason": None}],
+                        },
+                        {
+                            "id": cmpl_id,
+                            "object": "chat.completion.chunk",
+                            "created": created_ts,
+                            "model": chosen["id"],
+                            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                        },
+                    ]
+                    sse_payload = "".join(f"data: {json.dumps(c)}\\n\\n" for c in chunks) + "data: [DONE]\\n\\n"
+                    sse_bytes = sse_payload.encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                    self.send_header("Cache-Control", "no-cache")
+                    self.send_cors_headers()
+                    self.send_header("Content-Length", str(len(sse_bytes)))
+                    self.end_headers()
+                    self.wfile.write(sse_bytes)
+                    return
+
                 return self.send_json(
                     200,
                     {
-                        "id": f"chatcmpl_{secrets.token_hex(8)}",
+                        "id": cmpl_id,
                         "object": "chat.completion",
-                        "created": int(time.time()),
+                        "created": created_ts,
                         "model": chosen["id"],
                         "choices": [{"index": 0, "message": {"role": "assistant", "content": reply}, "finish_reason": "stop"}],
                     },
@@ -1353,16 +1417,24 @@ Automatically reads from Local Auto-Sync Bridge -> Online Cloud -> Local Offline
 """
 import json
 import os
+import re
+import secrets
 import sys
+import time
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MANIFEST_PATH = os.path.join(BASE_DIR, "vault", "manifest.json")
+VAULT_DIR = os.path.join(BASE_DIR, "vault")
+BLOBS_DIR = os.path.join(VAULT_DIR, "blobs")
+MANIFEST_PATH = os.path.join(VAULT_DIR, "manifest.json")
+QUEUE_PATH = os.path.join(VAULT_DIR, "pending_queue.json")
 
 API_KEY = os.environ.get("CLOUDY_API_KEY", "${sampleKey}")
 LOCAL_URL = os.environ.get("CLOUDY_LOCAL_URL", "http://127.0.0.1:8765")
 ONLINE_URL = os.environ.get("CLOUDY_REMOTE_URL", "${cloudOrigin}")
+USE_CONTENT_LENGTH_FRAMING = False
 
 
 def call_cloudy(method, path, body=None):
@@ -1381,7 +1453,7 @@ def call_cloudy(method, path, body=None):
         except Exception:
             continue
 
-    # Direct offline disk fallback if neither server nor internet is active
+    # Direct offline disk fallback if neither local bridge nor internet is active
     if os.path.exists(MANIFEST_PATH):
         with open(MANIFEST_PATH, "r", encoding="utf-8") as f:
             vault = json.load(f)
@@ -1406,6 +1478,51 @@ def call_cloudy(method, path, body=None):
                         with open(bp, "rb") as bf:
                             txt = bf.read().decode("utf-8", errors="replace")
                 return {"ok": True, "file": target, "content": txt or ""}
+        if method == "POST" and path == "/api/v1/ai/files" and isinstance(body, dict):
+            os.makedirs(BLOBS_DIR, exist_ok=True)
+            fid = f"fil_{secrets.token_hex(6)}"
+            name = str(body.get("name") or "note.md").strip()
+            content = str(body.get("content") or "")
+            safe = re.sub(r"[^a-zA-Z0-9._-]", "_", name)
+            rel_blob = f"vault/blobs/{fid}_{safe}"
+            raw_b = content.encode("utf-8")
+            with open(os.path.join(BASE_DIR, rel_blob), "wb") as bf:
+                bf.write(raw_b)
+            ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            rec = {
+                "id": fid,
+                "name": name,
+                "folderId": body.get("folderId"),
+                "folderPath": "/",
+                "mimeType": "text/markdown",
+                "kind": "note",
+                "size": len(raw_b),
+                "providerName": "Offline Vault (Queued)",
+                "tags": ["ai-generated"],
+                "textContent": content,
+                "blobPath": rel_blob,
+                "updatedAt": ts,
+            }
+            vault["files"] = [rec] + list(vault.get("files", []))
+            with open(MANIFEST_PATH, "w", encoding="utf-8") as mf:
+                json.dump(vault, mf, indent=2)
+            queue = []
+            if os.path.exists(QUEUE_PATH):
+                try:
+                    with open(QUEUE_PATH, "r", encoding="utf-8") as qf:
+                        queue = json.load(qf)
+                except Exception:
+                    queue = []
+            queue.append({
+                "id": f"q_{int(time.time()*1000)}_{fid}",
+                "type": "create_file",
+                "apiKey": API_KEY,
+                "payload": {"id": fid, "name": name, "content": content, "folderId": body.get("folderId")},
+                "createdAt": ts,
+            })
+            with open(QUEUE_PATH, "w", encoding="utf-8") as qf:
+                json.dump(queue, qf, indent=2)
+            return {"ok": True, "syncedLive": False, "file": rec}
     raise RuntimeError("Cloudy vault unreachable")
 
 
@@ -1449,11 +1566,13 @@ TOOLS = [
 
 
 def read_rpc_message():
+    global USE_CONTENT_LENGTH_FRAMING
     line = sys.stdin.buffer.readline()
     if not line:
         return None
     stripped = line.strip()
     if stripped.lower().startswith(b"content-length:"):
+        USE_CONTENT_LENGTH_FRAMING = True
         length = int(stripped.split(b":", 1)[1].strip())
         while True:
             hdr = sys.stdin.buffer.readline()
@@ -1467,8 +1586,13 @@ def read_rpc_message():
 
 
 def write_rpc_message(payload):
-    sys.stdout.write(json.dumps(payload) + "\\n")
-    sys.stdout.flush()
+    encoded = json.dumps(payload).encode("utf-8")
+    if USE_CONTENT_LENGTH_FRAMING:
+        sys.stdout.buffer.write(f"Content-Length: {len(encoded)}\\r\\n\\r\\n".encode("ascii") + encoded)
+        sys.stdout.buffer.flush()
+    else:
+        sys.stdout.buffer.write(encoded + b"\\n")
+        sys.stdout.buffer.flush()
 
 
 def handle_tool_call(name, args):
@@ -1515,6 +1639,10 @@ def main():
                 write_rpc_message({"jsonrpc": "2.0", "id": msg_id, "result": {}})
             elif method == "tools/list":
                 write_rpc_message({"jsonrpc": "2.0", "id": msg_id, "result": {"tools": TOOLS}})
+            elif method == "resources/list":
+                write_rpc_message({"jsonrpc": "2.0", "id": msg_id, "result": {"resources": []}})
+            elif method == "prompts/list":
+                write_rpc_message({"jsonrpc": "2.0", "id": msg_id, "result": {"prompts": []}})
             elif method == "tools/call":
                 params = msg.get("params") or {}
                 text = handle_tool_call(params.get("name"), params.get("arguments"))

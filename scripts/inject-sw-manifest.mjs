@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 
 const DIST_DIR = path.resolve('dist');
 const SW_PATH = path.join(DIST_DIR, 'sw.js');
@@ -21,11 +22,21 @@ function collectAssets(dir, prefix = '') {
 
 if (fs.existsSync(SW_PATH)) {
   const assets = Array.from(new Set(['/', ...collectAssets(DIST_DIR)]));
-  const swContent = fs.readFileSync(SW_PATH, 'utf8');
-  const updated = swContent.replace(
+  const versionHash = crypto
+    .createHash('sha1')
+    .update(assets.join('|'))
+    .digest('hex')
+    .slice(0, 10);
+
+  let swContent = fs.readFileSync(SW_PATH, 'utf8');
+  swContent = swContent.replace(
+    /const CACHE_NAME = ['"][^'"]+['"];/,
+    `const CACHE_NAME = 'cloudy-xkilo-${versionHash}';`
+  );
+  swContent = swContent.replace(
     /\/\* __CLOUDY_PRECACHE_MANIFEST__ \*\/ \[[\s\S]*?\];/,
     `/* __CLOUDY_PRECACHE_MANIFEST__ */ ${JSON.stringify(assets, null, 2)};`
   );
-  fs.writeFileSync(SW_PATH, updated, 'utf8');
-  console.log(`Injected ${assets.length} precache assets into dist/sw.js`);
+  fs.writeFileSync(SW_PATH, swContent, 'utf8');
+  console.log(`Injected ${assets.length} precache assets into dist/sw.js (cache: cloudy-xkilo-${versionHash})`);
 }

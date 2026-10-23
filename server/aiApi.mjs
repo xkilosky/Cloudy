@@ -7,7 +7,9 @@ import {
   getUnsealedAccount,
   isGenuineVerifiedAccount,
   readAccountBinary,
+  readOfflineVaultBinaryAsync,
   writeAccountBinary,
+  deleteAccountBinary,
   selectTargetAccount,
   makeId,
 } from './store.mjs';
@@ -109,6 +111,9 @@ function recordAiAudit(db, keyObj, method, endpoint, statusCode) {
 
 async function resolveFileBinaryBuffer(db, file) {
   let buf = readAccountBinary(file.accountId, file.id, file.mirrorAccountId);
+  if (!buf && (!file.accountId || file.accountId === 'offline_vault')) {
+    buf = await readOfflineVaultBinaryAsync(db.vaultId, file.id);
+  }
   if (!buf && typeof file.textContent === 'string') {
     buf = Buffer.from(file.textContent, 'utf8');
   }
@@ -121,7 +126,7 @@ async function resolveFileBinaryBuffer(db, file) {
         (pid) => getOAuthConfigForProvider(db, pid),
         makeTokenUpdateHandler(db, acc)
       );
-      if (buf) writeAccountBinary(file.accountId, file.id, buf);
+      if (buf) writeAccountBinary(file.accountId, file.id, buf, db.vaultId, file.mimeType);
     }
   }
   return buf;
@@ -135,7 +140,8 @@ export function createAiRouter() {
     try {
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Access-Control-Allow-Headers', 'Authorization, X-API-Key, Content-Type');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
+      res.setHeader('Access-Control-Allow-Private-Network', 'true');
       if (req.method === 'OPTIONS') return res.status(204).end();
 
       const auth = req.headers.authorization || '';
@@ -483,6 +489,9 @@ export function createAiRouter() {
           ? clientId
           : makeId('fil');
 
+      const existingIdx = db.files.findIndex((f) => f.id === id);
+      const existingFile = existingIdx >= 0 ? db.files[existingIdx] : null;
+
       let accountId = 'offline_vault';
       let providerId = 'offline_vault';
       let providerName = 'Offline Vault';
@@ -497,16 +506,19 @@ export function createAiRouter() {
           buf,
           mimeType,
           (pid) => getOAuthConfigForProvider(db, pid),
-          makeTokenUpdateHandler(db, primary)
+          makeTokenUpdateHandler(db, primary),
+          existingFile && existingFile.accountId === primary.id
+            ? { remoteId: existingFile.remoteId, remotePath: existingFile.remotePath }
+            : null
         );
         accountId = primary.id;
         providerId = primary.providerId;
         providerName = primary.providerName;
         mirrorAccountId = mirror ? mirror.id : null;
-        if (mirror) writeAccountBinary(mirror.id, id, buf);
+        if (mirror) writeAccountBinary(mirror.id, id, buf, db.vaultId, mimeType);
       }
 
-      writeAccountBinary(accountId, id, buf);
+      writeAccountBinary(accountId, id, buf, db.vaultId, mimeType);
 
       const now = new Date().toISOString();
       const textContent =
@@ -539,7 +551,6 @@ export function createAiRouter() {
         updatedAt: now,
       };
 
-      const existingIdx = db.files.findIndex((f) => f.id === id);
       if (existingIdx >= 0) {
         db.files[existingIdx] = {
           ...db.files[existingIdx],
@@ -615,7 +626,7 @@ export function createAiRouter() {
             ? Buffer.from(base64Content, 'base64')
             : Buffer.from(nextText, 'utf8');
 
-        writeAccountBinary(file.accountId, file.id, buf);
+        writeAccountBinary(file.accountId, file.id, buf, db.vaultId, file.mimeType);
         file.size = buf.byteLength;
         file.textContent =
           nextText !== null
@@ -632,7 +643,8 @@ export function createAiRouter() {
             buf,
             file.mimeType || 'text/plain',
             (pid) => getOAuthConfigForProvider(db, pid),
-            makeTokenUpdateHandler(db, owningAcc)
+            makeTokenUpdateHandler(db, owningAcc),
+            { remoteId: file.remoteId, remotePath: file.remotePath }
           );
           if (remoteMeta) {
             file.remoteId = remoteMeta.remoteId || file.remoteId;
@@ -650,6 +662,30 @@ export function createAiRouter() {
     } catch (err) {
       res.status(400).json({ ok: false, error: String(err.message || err) });
     }
+  });
+
+  // DELETE /api/v1/ai/files/:id (Delete file when scope === 'read_write')
+  router.delete('/files/:id', (req, res) => {
+    const db = req.cloudyDb;
+    if (req.aiKey.scope !== 'read_write') {
+      recordAiAudit(db, req.aiKey, 'DELETE', `/api/v1/ai/files/${req.params.id}`, 403);
+      return res.status(403).json({
+        ok: false,
+        error: 'This API key is read-only. Create a key with read_write scope to delete files.',
+      });
+    }
+
+    const { files } = getAllowedScopeForKey(db, req.aiKey);
+    const file = files.find((f) => f.id === req.params.id);
+    if (!file) {
+      return res.status(404).json({ ok: false, error: 'File not found or not permitted' });
+    }
+
+    deleteAccountBinary(file.accountId, file.id, file.mirrorAccountId, db.vaultId);
+    db.files = db.files.filter((f) => f.id !== file.id);
+    saveDb(db.vaultId);
+    recordAiAudit(db, req.aiKey, 'DELETE', `/api/v1/ai/files/${file.id}`, 200);
+    res.json({ ok: true });
   });
 
   return router;
