@@ -521,6 +521,10 @@ export function App() {
             onSyncAccount={handleSyncAccount}
             onDisconnectAccount={handleDisconnectAccount}
             onUpdateAllocationRule={handleUpdateRule}
+            onConnectedRefresh={async (label) => {
+              await refreshVault();
+              showToast(`Connected ${label || 'Cloud Storage'}`);
+            }}
           />
         ) : activeTab === 'ai-keys' ? (
           <AiApiKeysView

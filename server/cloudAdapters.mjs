@@ -121,9 +121,94 @@ async function s3SignedFetch({
   });
 }
 
-// --- Silent OAuth 2.0 Token Refresh ---
+// --- Google Service Account RS256 JWT Assertion Minter (Zero OAuth Consent Screen, Never Expires) ---
+async function mintGoogleServiceAccountToken(sa) {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const headerB64 = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
+  const claimB64 = Buffer.from(
+    JSON.stringify({
+      iss: sa.client_email,
+      scope: 'https://www.googleapis.com/auth/drive',
+      aud: sa.token_uri || 'https://oauth2.googleapis.com/token',
+      iat: nowSec,
+      exp: nowSec + 3600,
+    })
+  ).toString('base64url');
+
+  const unsigned = `${headerB64}.${claimB64}`;
+  const signer = crypto.createSign('RSA-SHA256');
+  signer.update(unsigned);
+  const sigB64 = signer.sign(sa.private_key).toString('base64url');
+  const assertion = `${unsigned}.${sigB64}`;
+
+  const body = new URLSearchParams({
+    grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+    assertion,
+  });
+  const res = await fetch(sa.token_uri || 'https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
+  });
+  if (!res.ok) {
+    throw new Error(`Service Account token error (${res.status}): ${await res.text()}`);
+  }
+  const data = await res.json();
+  return {
+    accessToken: data.access_token,
+    expiresAt: Date.now() + Number(data.expires_in || 3500) * 1000,
+  };
+}
+
+// Smart parser for raw token, OAuth Playground JSON, rclone JSON, or Google Service Account JSON
+async function normalizeSmartTokenInput(rawCreds = {}) {
+  const out = { ...rawCreds };
+  const candidate = (rawCreds.smartPayload || rawCreds.accessToken || '').trim();
+  if (candidate.startsWith('{') || candidate.includes('"access_token"') || candidate.includes('"private_key"')) {
+    const startIdx = candidate.indexOf('{');
+    const endIdx = candidate.lastIndexOf('}');
+    const jsonSlice = startIdx >= 0 && endIdx > startIdx ? candidate.slice(startIdx, endIdx + 1) : candidate;
+    const parsed = JSON.parse(jsonSlice);
+
+    if (parsed.type === 'service_account' && parsed.client_email && parsed.private_key) {
+      const minted = await mintGoogleServiceAccountToken(parsed);
+      return {
+        serviceAccount: {
+          client_email: parsed.client_email,
+          private_key: parsed.private_key,
+          token_uri: parsed.token_uri || 'https://oauth2.googleapis.com/token',
+        },
+        accessToken: minted.accessToken,
+        expiresAt: minted.expiresAt,
+      };
+    }
+
+    out.accessToken = parsed.access_token || parsed.accessToken || out.accessToken;
+    out.refreshToken = parsed.refresh_token || parsed.refreshToken || out.refreshToken;
+    if (parsed.expires_in) {
+      out.expiresAt = Date.now() + Number(parsed.expires_in) * 1000;
+    } else if (parsed.expiry) {
+      const ts = Date.parse(parsed.expiry);
+      if (!Number.isNaN(ts)) out.expiresAt = ts;
+    }
+  }
+  return out;
+}
+
+// --- Silent OAuth 2.0 / Service Account Token Refresh ---
 export async function getValidOAuthToken(account, getOAuthConfig, onTokensUpdated) {
   const creds = account.credentials || unsealCredentials(account.sealedCredentials) || {};
+
+  // Auto-refresh Google Service Account JWT when near expiry
+  if (creds.serviceAccount) {
+    const notExpired = creds.accessToken && creds.expiresAt && Date.now() < creds.expiresAt - 60_000;
+    if (notExpired) return creds.accessToken;
+    const minted = await mintGoogleServiceAccountToken(creds.serviceAccount);
+    const updated = { ...creds, accessToken: minted.accessToken, expiresAt: minted.expiresAt };
+    if (onTokensUpdated) onTokensUpdated(updated);
+    return updated.accessToken;
+  }
+
   if (!creds.accessToken) {
     throw new Error(`Missing access token for ${account.providerName}`);
   }
@@ -178,8 +263,12 @@ export async function getValidOAuthToken(account, getOAuthConfig, onTokensUpdate
 }
 
 // --- Verify Credentials & Fetch Real Quota / User Info ---
-export async function verifyAndInspectProvider(providerId, rawCreds) {
-  // 1. Google Drive (OAuth2)
+export async function verifyAndInspectProvider(providerId, inputCreds) {
+  const rawCreds = ['google_drive', 'dropbox', 'onedrive', 'box'].includes(providerId)
+    ? await normalizeSmartTokenInput(inputCreds)
+    : inputCreds;
+
+  // 1. Google Drive (OAuth2, Playground JSON, rclone JSON, or Service Account JSON)
   if (providerId === 'google_drive') {
     const res = await fetch(
       'https://www.googleapis.com/drive/v3/about?fields=user(displayName,emailAddress),storageQuota(limit,usage)',
@@ -192,9 +281,10 @@ export async function verifyAndInspectProvider(providerId, rawCreds) {
     const data = await res.json();
     const limit = Number(data.storageQuota?.limit || 15 * 1024 ** 3);
     const usage = Number(data.storageQuota?.usage || 0);
+    const email = rawCreds.serviceAccount?.client_email || data.user?.emailAddress || 'google-drive-user';
     return {
-      email: data.user?.emailAddress || 'google-drive-user',
-      accountLabel: data.user?.displayName ? `Google Drive (${data.user.displayName})` : 'Google Drive',
+      email,
+      accountLabel: data.user?.displayName ? `Google Drive (${data.user.displayName})` : `Google Drive (${email})`,
       quotaBytes: limit,
       usedBytes: usage,
       credentials: rawCreds,
@@ -270,11 +360,47 @@ export async function verifyAndInspectProvider(providerId, rawCreds) {
     };
   }
 
-  // 5. pCloud (OAuth2 US / EU)
+  // 5. pCloud (Direct Email + Password getauth=1 OR OAuth2 US / EU — Zero Developer Console!)
   if (providerId === 'pcloud') {
+    // Mode A: Direct Email + Password login (no OAuth app required!)
+    if (rawCreds.email && rawCreds.password) {
+      for (const host of ['https://api.pcloud.com', 'https://eapi.pcloud.com']) {
+        const body = new URLSearchParams({
+          getauth: '1',
+          logout: '1',
+          username: rawCreds.email.trim(),
+          password: rawCreds.password,
+        });
+        if (rawCreds.mfaCode) body.set('code', rawCreds.mfaCode.trim());
+        const res = await fetch(`${host}/userinfo`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: body.toString(),
+        });
+        if (res.ok) {
+          const info = await res.json();
+          if (info.result === 0 && info.auth) {
+            return {
+              email: info.email || rawCreds.email.trim(),
+              accountLabel: `pCloud (${info.email || rawCreds.email.trim()})`,
+              quotaBytes: Number(info.quota || 10 * 1024 ** 3),
+              usedBytes: Number(info.usedquota || 0),
+              credentials: { authToken: info.auth, apiHost: host },
+            };
+          }
+        }
+      }
+      throw new Error('pCloud login failed. Check your email, password, or 2FA code.');
+    }
+
+    // Mode B: OAuth token / auth token
+    const tok = rawCreds.authToken || rawCreds.accessToken;
     for (const host of ['https://api.pcloud.com', 'https://eapi.pcloud.com']) {
-      const res = await fetch(`${host}/userinfo`, {
-        headers: { Authorization: `Bearer ${rawCreds.accessToken}` },
+      const url = rawCreds.authToken
+        ? `${host}/userinfo?auth=${encodeURIComponent(rawCreds.authToken)}`
+        : `${host}/userinfo`;
+      const res = await fetch(url, {
+        headers: rawCreds.authToken ? {} : { Authorization: `Bearer ${tok}` },
       });
       if (res.ok) {
         const info = await res.json();
@@ -289,7 +415,7 @@ export async function verifyAndInspectProvider(providerId, rawCreds) {
         }
       }
     }
-    throw new Error('pCloud token verification failed on both US and EU endpoints.');
+    throw new Error('pCloud verification failed on both US and EU endpoints.');
   }
 
   // 6. GitHub Cloud Vault (OAuth2 or Personal Access Token -> Real Private Repo)
@@ -600,13 +726,15 @@ export async function uploadFileToRemoteProvider(
     const host = creds.apiHost || 'https://api.pcloud.com';
     const fd = new FormData();
     fd.append('file', new Blob([buffer], { type: mimeType }), safeName);
-    const res = await fetch(`${host}/uploadfile?folderid=0&nopartial=1`, {
+    const authQs = creds.authToken ? `&auth=${encodeURIComponent(creds.authToken)}` : '';
+    const res = await fetch(`${host}/uploadfile?folderid=0&nopartial=1${authQs}`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${creds.accessToken}` },
+      headers: creds.authToken ? {} : { Authorization: `Bearer ${creds.accessToken}` },
       body: fd,
     });
     if (!res.ok) throw new Error(`pCloud upload failed (${res.status})`);
     const out = await res.json();
+    if (out.result !== 0) throw new Error(`pCloud upload error: ${out.error || out.result}`);
     const fileId = out.fileids?.[0];
     return { remoteId: String(fileId || ''), remotePath: safeName };
   }
@@ -757,6 +885,21 @@ export async function downloadFileFromRemoteProvider(
     );
     if (!res.ok) return null;
     return Buffer.from(await res.arrayBuffer());
+  }
+
+  if (providerId === 'pcloud') {
+    const host = creds.apiHost || 'https://api.pcloud.com';
+    const authQs = creds.authToken ? `&auth=${encodeURIComponent(creds.authToken)}` : '';
+    const linkRes = await fetch(
+      `${host}/getfilelink?fileid=${encodeURIComponent(remoteId)}${authQs}`,
+      { headers: creds.authToken ? {} : { Authorization: `Bearer ${creds.accessToken}` } }
+    );
+    if (!linkRes.ok) return null;
+    const linkData = await linkRes.json();
+    if (linkData.result !== 0 || !linkData.hosts?.[0] || !linkData.path) return null;
+    const fileRes = await fetch(`https://${linkData.hosts[0]}${linkData.path}`);
+    if (!fileRes.ok) return null;
+    return Buffer.from(await fileRes.arrayBuffer());
   }
 
   if (providerId === 'github_vault') {
@@ -958,5 +1101,197 @@ export async function listRemoteProviderFiles(account, getOAuthConfig, onTokensU
     return items;
   }
 
+  if (providerId === 'pcloud') {
+    const host = creds.apiHost || 'https://api.pcloud.com';
+    const authQs = creds.authToken ? `&auth=${encodeURIComponent(creds.authToken)}` : '';
+    const res = await fetch(`${host}/listfolder?folderid=0${authQs}`, {
+      headers: creds.authToken ? {} : { Authorization: `Bearer ${creds.accessToken}` },
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const contents = data.metadata?.contents || [];
+    return contents
+      .filter((c) => !c.isfolder)
+      .slice(0, 60)
+      .map((c) => ({
+        remoteId: String(c.fileid),
+        remotePath: c.name,
+        name: c.name,
+        mimeType: c.contenttype || 'application/octet-stream',
+        size: Number(c.size || 0),
+        updatedAt: c.modified ? new Date(c.modified).toISOString() : new Date().toISOString(),
+      }));
+  }
+
   return [];
 }
+
+// --- Zero-Console Nextcloud 1-Click Login Flow v2 (No OAuth App Required!) ---
+export async function initNextcloudLoginFlow(serverUrl) {
+  let clean = String(serverUrl || '').trim().replace(/\/+$/, '');
+  if (!clean.startsWith('http://') && !clean.startsWith('https://')) {
+    clean = `https://${clean}`;
+  }
+  // Strip /remote.php/... if user pasted WebDAV URL instead of base URL
+  const davIdx = clean.indexOf('/remote.php');
+  if (davIdx > 0) clean = clean.slice(0, davIdx);
+
+  const res = await fetch(`${clean}/index.php/login/v2`, {
+    method: 'POST',
+    headers: { 'User-Agent': 'Cloudy by X-Kilo' },
+  });
+  if (!res.ok) {
+    throw new Error(`Nextcloud Login Flow v2 unavailable on ${clean} (${res.status})`);
+  }
+  const data = await res.json();
+  if (!data.login || !data.poll?.endpoint || !data.poll?.token) {
+    throw new Error('Unexpected response from Nextcloud Login Flow v2.');
+  }
+  return {
+    loginUrl: data.login,
+    pollEndpoint: data.poll.endpoint,
+    pollToken: data.poll.token,
+  };
+}
+
+export async function pollNextcloudLoginFlow(pollEndpoint, pollToken) {
+  const res = await fetch(pollEndpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ token: pollToken }).toString(),
+  });
+  if (res.status === 404) {
+    return { pending: true };
+  }
+  if (!res.ok) {
+    throw new Error(`Nextcloud poll failed (${res.status})`);
+  }
+  const data = await res.json();
+  const base = String(data.server || '').replace(/\/+$/, '');
+  const webdavUrl = `${base}/remote.php/dav/files/${encodeURIComponent(data.loginName)}`;
+  return {
+    pending: false,
+    credentials: {
+      webdavUrl,
+      username: data.loginName,
+      password: data.appPassword,
+    },
+  };
+}
+
+// --- Multi-Cloud rclone.conf Parser (Connects All Accounts in 1 Click, Zero Console!) ---
+export function parseRcloneConfig(confText) {
+  const sections = [];
+  let current = null;
+
+  for (const rawLine of String(confText || '').split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#') || line.startsWith(';')) continue;
+    const secMatch = line.match(/^\[([^\]]+)\]$/);
+    if (secMatch) {
+      current = { name: secMatch[1].trim(), props: {} };
+      sections.push(current);
+      continue;
+    }
+    if (current) {
+      const eqIdx = line.indexOf('=');
+      if (eqIdx > 0) {
+        const k = line.slice(0, eqIdx).trim();
+        const v = line.slice(eqIdx + 1).trim();
+        current.props[k] = v;
+      }
+    }
+  }
+
+  const mapped = [];
+  for (const sec of sections) {
+    const t = (sec.props.type || '').toLowerCase();
+    if (t === 'drive') {
+      mapped.push({
+        sectionName: sec.name,
+        providerId: 'google_drive',
+        credentials: {
+          smartPayload: sec.props.token || sec.props.service_account_credentials || '',
+          clientId: sec.props.client_id || '',
+          clientSecret: sec.props.client_secret || '',
+        },
+      });
+    } else if (t === 'dropbox') {
+      mapped.push({
+        sectionName: sec.name,
+        providerId: 'dropbox',
+        credentials: {
+          smartPayload: sec.props.token || '',
+          clientId: sec.props.client_id || '',
+          clientSecret: sec.props.client_secret || '',
+        },
+      });
+    } else if (t === 'onedrive') {
+      mapped.push({
+        sectionName: sec.name,
+        providerId: 'onedrive',
+        credentials: {
+          smartPayload: sec.props.token || '',
+          clientId: sec.props.client_id || '',
+          clientSecret: sec.props.client_secret || '',
+        },
+      });
+    } else if (t === 'box') {
+      mapped.push({
+        sectionName: sec.name,
+        providerId: 'box',
+        credentials: {
+          smartPayload: sec.props.token || '',
+          clientId: sec.props.client_id || '',
+          clientSecret: sec.props.client_secret || '',
+        },
+      });
+    } else if (t === 'pcloud') {
+      let tok = '';
+      try {
+        tok = JSON.parse(sec.props.token || '{}').access_token || '';
+      } catch {
+        tok = sec.props.token || '';
+      }
+      mapped.push({
+        sectionName: sec.name,
+        providerId: 'pcloud',
+        credentials: {
+          accessToken: tok,
+          apiHost: sec.props.hostname ? `https://${sec.props.hostname}` : 'https://api.pcloud.com',
+        },
+      });
+    } else if (t === 's3') {
+      const ep = sec.props.endpoint || '';
+      const pid = ep.includes('r2.cloudflarestorage')
+        ? 'cloudflare_r2'
+        : ep.includes('backblazeb2')
+          ? 'backblaze_b2'
+          : 'storj';
+      mapped.push({
+        sectionName: sec.name,
+        providerId: pid,
+        credentials: {
+          endpoint: ep.startsWith('http') ? ep : `https://${ep}`,
+          accessKeyId: sec.props.access_key_id || '',
+          secretAccessKey: sec.props.secret_access_key || '',
+          bucket: sec.props.bucket || sec.name,
+        },
+      });
+    } else if (t === 'webdav' && sec.props.url && sec.props.user && !sec.props.pass?.startsWith('*')) {
+      const u = sec.props.url;
+      const pid = u.includes('koofr') ? 'koofr' : u.includes('yandex') ? 'yandex_disk' : 'nextcloud';
+      mapped.push({
+        sectionName: sec.name,
+        providerId: pid,
+        credentials: {
+          webdavUrl: u,
+          username: sec.props.user,
+          password: sec.props.pass || '',
+        },
+      });
+    }
+  }
+  return mapped;
+}
+

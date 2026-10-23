@@ -3,6 +3,8 @@ export type AllocationRule = 'most_free' | 'waterfall' | 'by_type' | 'mirror';
 export type ProviderAuthMode =
   | 'oauth2'
   | 'mega'
+  | 'pcloud'
+  | 'nextcloud'
   | 's3'
   | 'webdav'
   | 'github'
@@ -15,6 +17,7 @@ export interface ProviderCatalogItem {
   freeBytes: number;
   freeLabel: string;
   authMode: ProviderAuthMode;
+  zeroConsole?: boolean;
   signupUrl: string;
   consoleUrl?: string;
   authorizeUrl?: string;

@@ -28,6 +28,9 @@ import {
   downloadFileFromRemoteProvider,
   listRemoteProviderFiles,
   sealCredentials,
+  initNextcloudLoginFlow,
+  pollNextcloudLoginFlow,
+  parseRcloneConfig,
 } from './cloudAdapters.mjs';
 import {
   createAiRouter,
@@ -367,6 +370,95 @@ app.post('/api/accounts/connect', async (req, res) => {
       ok: false,
       error: String(err.message || err),
     });
+  }
+});
+
+// --- Zero-Console Nextcloud 1-Click Browser Login Flow v2 ---
+app.post('/api/nextcloud/login-init', async (req, res) => {
+  try {
+    const { serverUrl } = req.body || {};
+    if (!serverUrl) return res.status(400).json({ ok: false, error: 'serverUrl is required' });
+    const flow = await initNextcloudLoginFlow(serverUrl);
+    res.json({ ok: true, ...flow });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: String(err.message || err) });
+  }
+});
+
+app.post('/api/nextcloud/login-poll', async (req, res) => {
+  try {
+    const db = loadDb(reqVaultId(req));
+    const { pollEndpoint, pollToken } = req.body || {};
+    const result = await pollNextcloudLoginFlow(pollEndpoint, pollToken);
+    if (result.pending) {
+      return res.json({ ok: true, pending: true });
+    }
+    const verified = await verifyAndInspectProvider('nextcloud', result.credentials);
+    const account = addVerifiedProviderAccount(db, {
+      providerId: 'nextcloud',
+      email: verified.email,
+      accountLabel: verified.accountLabel,
+      quotaBytes: verified.quotaBytes,
+      usedBytes: verified.usedBytes,
+      credentials: verified.credentials,
+      connectionMode: 'login_flow_v2',
+    });
+    const importedFilesCount = await importRemoteFilesIntoVault(db, account);
+    res.json({
+      ok: true,
+      pending: false,
+      account: sanitizeAccount(account),
+      importedFilesCount,
+    });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: String(err.message || err) });
+  }
+});
+
+// --- Multi-Cloud 1-Click rclone.conf Importer (Mounts All Cloud Accounts at Once) ---
+app.post('/api/accounts/import-rclone', async (req, res) => {
+  try {
+    const db = loadDb(reqVaultId(req));
+    const { configText = '' } = req.body || {};
+    const entries = parseRcloneConfig(configText);
+    if (entries.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        error: 'No supported cloud remotes found in rclone.conf text.',
+      });
+    }
+
+    const connected = [];
+    const errors = [];
+    for (const entry of entries) {
+      try {
+        const verified = await verifyAndInspectProvider(entry.providerId, entry.credentials);
+        const account = addVerifiedProviderAccount(db, {
+          providerId: entry.providerId,
+          email: verified.email,
+          accountLabel: `${verified.accountLabel} [${entry.sectionName}]`,
+          quotaBytes: verified.quotaBytes,
+          usedBytes: verified.usedBytes,
+          credentials: verified.credentials,
+          connectionMode: 'rclone_import',
+        });
+        await importRemoteFilesIntoVault(db, account);
+        connected.push(sanitizeAccount(account));
+      } catch (e) {
+        errors.push(`[${entry.sectionName}]: ${e.message || e}`);
+      }
+    }
+
+    if (connected.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        error: errors.join(' | ') || 'Failed to verify remotes in rclone.conf',
+      });
+    }
+
+    res.json({ ok: true, connectedCount: connected.length, connected, errors });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: String(err.message || err) });
   }
 });
 

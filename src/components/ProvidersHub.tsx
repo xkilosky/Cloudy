@@ -1,11 +1,21 @@
-import React, { useState } from 'react';
-import { Plus, RefreshCw, Trash2, ExternalLink } from 'lucide-react';
+import React, { useRef, useState } from 'react';
+import {
+  Plus,
+  RefreshCw,
+  Trash2,
+  ExternalLink,
+  Upload,
+  Zap,
+  X,
+  Loader2,
+} from 'lucide-react';
 import type {
   VaultState,
   ProviderCatalogItem,
   AllocationRule,
 } from '../types';
 import { formatBytes } from '../lib/format';
+import { apiFetch } from '../lib/vaultClient';
 import { ConnectProviderModal } from './ConnectProviderModal';
 
 interface ProvidersHubProps {
@@ -18,6 +28,7 @@ interface ProvidersHubProps {
   onSyncAccount: (accountId: string) => Promise<void>;
   onDisconnectAccount: (accountId: string) => Promise<void>;
   onUpdateAllocationRule: (rule: AllocationRule) => Promise<void>;
+  onConnectedRefresh: (label?: string) => Promise<void>;
 }
 
 const RULES: { id: AllocationRule; label: string }[] = [
@@ -34,10 +45,18 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
   onSyncAccount,
   onDisconnectAccount,
   onUpdateAllocationRule,
+  onConnectedRefresh,
 }) => {
   const [selectedProvider, setSelectedProvider] =
     useState<ProviderCatalogItem | null>(null);
   const [syncingAccId, setSyncingAccId] = useState<string | null>(null);
+
+  // 1-Click rclone.conf batch importer
+  const [showRcloneModal, setShowRcloneModal] = useState(false);
+  const [rcloneText, setRcloneText] = useState('');
+  const [importingRclone, setImportingRclone] = useState(false);
+  const [rcloneErr, setRcloneErr] = useState<string | null>(null);
+  const confFileRef = useRef<HTMLInputElement>(null);
 
   const totalQuota = Math.max(vault.summary.totalQuotaBytes || 1, 1);
   const totalUsed = vault.summary.totalUsedBytes || 0;
@@ -49,6 +68,35 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
       await onSyncAccount(id);
     } finally {
       setSyncingAccId(null);
+    }
+  };
+
+  const handleRcloneFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setRcloneText(await f.text());
+    e.target.value = '';
+  };
+
+  const handleImportRclone = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setRcloneErr(null);
+    setImportingRclone(true);
+    try {
+      const res = await apiFetch('/api/accounts/import-rclone', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ configText: rcloneText }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Import failed');
+      setShowRcloneModal(false);
+      setRcloneText('');
+      await onConnectedRefresh(`${data.connectedCount} Cloud Account(s)`);
+    } catch (err: unknown) {
+      setRcloneErr(err instanceof Error ? err.message : String(err));
+    } finally {
+      setImportingRclone(false);
     }
   };
 
@@ -77,30 +125,42 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
             </div>
           </div>
 
-          {/* Minimalist Routing Rule Selector */}
-          <div className="space-y-2">
-            <div className="text-[11px] font-mono uppercase tracking-widest text-zinc-500">
-              Allocation Rule
+          <div className="flex flex-col sm:flex-row items-start sm:items-end gap-4">
+            {/* Minimalist Routing Rule Selector */}
+            <div className="space-y-2">
+              <div className="text-[11px] font-mono uppercase tracking-widest text-zinc-500">
+                Allocation Rule
+              </div>
+              <div className="inline-flex flex-wrap gap-1.5 bg-black border border-white/[0.08] p-1 rounded-xl">
+                {RULES.map((r) => {
+                  const active = vault.settings.allocationRule === r.id;
+                  return (
+                    <button
+                      key={r.id}
+                      disabled={isOffline}
+                      onClick={() => onUpdateAllocationRule(r.id)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+                        active
+                          ? 'bg-[#00F0FF] text-black font-semibold'
+                          : 'text-zinc-400 hover:text-white'
+                      }`}
+                    >
+                      {r.label}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
-            <div className="inline-flex flex-wrap gap-1.5 bg-black border border-white/[0.08] p-1 rounded-xl">
-              {RULES.map((r) => {
-                const active = vault.settings.allocationRule === r.id;
-                return (
-                  <button
-                    key={r.id}
-                    disabled={isOffline}
-                    onClick={() => onUpdateAllocationRule(r.id)}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
-                      active
-                        ? 'bg-[#00F0FF] text-black font-semibold'
-                        : 'text-zinc-400 hover:text-white'
-                    }`}
-                  >
-                    {r.label}
-                  </button>
-                );
-              })}
-            </div>
+
+            {/* 1-Click Import All Clouds via rclone.conf */}
+            <button
+              disabled={isOffline}
+              onClick={() => setShowRcloneModal(true)}
+              className="px-4 py-2.5 rounded-xl bg-black hover:bg-white/[0.05] border border-[#00F0FF]/40 text-[#00F0FF] text-xs font-bold inline-flex items-center gap-2 transition shrink-0"
+            >
+              <Upload className="w-3.5 h-3.5" />
+              Import rclone.conf
+            </button>
           </div>
         </div>
 
@@ -111,7 +171,10 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
           </h2>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
             {vault.accounts.map((acc) => {
-              const pct = Math.min(100, (acc.usedBytes / Math.max(acc.quotaBytes, 1)) * 100);
+              const pct = Math.min(
+                100,
+                (acc.usedBytes / Math.max(acc.quotaBytes, 1)) * 100
+              );
               const isCore = acc.providerId === 'xkilo_core';
               return (
                 <div
@@ -139,7 +202,9 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
                         >
                           <RefreshCw
                             className={`w-3.5 h-3.5 ${
-                              syncingAccId === acc.id ? 'animate-spin text-[#00F0FF]' : ''
+                              syncingAccId === acc.id
+                                ? 'animate-spin text-[#00F0FF]'
+                                : ''
                             }`}
                           />
                         </button>
@@ -157,7 +222,9 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
                   <div className="space-y-1.5">
                     <div className="flex justify-between text-xs font-mono text-zinc-400 tabular-nums">
                       <span>{formatBytes(acc.usedBytes)}</span>
-                      <span className="text-white">{formatBytes(acc.quotaBytes, 0)}</span>
+                      <span className="text-white">
+                        {formatBytes(acc.quotaBytes, 0)}
+                      </span>
                     </div>
                     <div className="h-1 rounded-full bg-zinc-900 overflow-hidden">
                       <div
@@ -176,7 +243,7 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
         <section className="space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="text-[11px] font-medium uppercase tracking-widest text-zinc-500">
-              Connect Free Cloud Storage
+              Connect Free Cloud Storage (Zero OAuth App Setup)
             </h2>
           </div>
 
@@ -211,14 +278,20 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
                   </div>
 
                   <div className="flex items-center justify-between pt-2 border-t border-white/[0.05]">
-                    <a
-                      href={provider.signupUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-[11px] text-zinc-500 hover:text-zinc-300 inline-flex items-center gap-1 transition"
-                    >
-                      Get Free Account <ExternalLink className="w-3 h-3" />
-                    </a>
+                    {provider.zeroConsole ? (
+                      <span className="text-[11px] text-[#00F0FF]/80 inline-flex items-center gap-1 font-mono">
+                        <Zap className="w-3 h-3" /> Instant Login
+                      </span>
+                    ) : (
+                      <a
+                        href={provider.signupUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-[11px] text-zinc-500 hover:text-zinc-300 inline-flex items-center gap-1 transition"
+                      >
+                        Free Account <ExternalLink className="w-3 h-3" />
+                      </a>
+                    )}
 
                     <button
                       disabled={isOffline}
@@ -240,7 +313,84 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
         provider={selectedProvider}
         onClose={() => setSelectedProvider(null)}
         onConnectCredentials={onConnectCredentials}
+        onConnectedRefresh={onConnectedRefresh}
       />
+
+      {/* 1-Click rclone.conf Multi-Account Import Modal */}
+      {showRcloneModal && (
+        <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4">
+          <form
+            onSubmit={handleImportRclone}
+            className="w-full max-w-md rounded-2xl bg-[#07090C] border border-white/10 p-6 space-y-4 shadow-2xl"
+          >
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-[11px] font-mono text-[#00F0FF] uppercase tracking-wider">
+                  Multi-Cloud Batch Mount
+                </div>
+                <h3 className="text-base font-bold text-white mt-0.5">
+                  Import rclone.conf
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowRcloneModal(false)}
+                className="text-zinc-500 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-zinc-400 leading-relaxed">
+              Connect Google Drive, OneDrive, Dropbox, Box, pCloud, S3/R2/B2/Storj, and WebDAV all at once using{' '}
+              <code className="text-zinc-200 font-mono">rclone config</code>{' '}
+              (uses rclone&apos;s pre-verified OAuth apps — zero developer consoles).
+            </p>
+
+            {rcloneErr && (
+              <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-xs text-red-300">
+                {rcloneErr}
+              </div>
+            )}
+
+            <div>
+              <input
+                ref={confFileRef}
+                type="file"
+                accept=".conf,.txt"
+                className="hidden"
+                onChange={handleRcloneFile}
+              />
+              <button
+                type="button"
+                onClick={() => confFileRef.current?.click()}
+                className="w-full py-2.5 px-3 rounded-xl bg-black hover:bg-white/[0.04] border border-dashed border-[#00F0FF]/40 text-xs text-[#00F0FF] font-semibold inline-flex items-center justify-center gap-2 transition"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                Choose rclone.conf File
+              </button>
+            </div>
+
+            <textarea
+              required
+              rows={5}
+              value={rcloneText}
+              onChange={(e) => setRcloneText(e.target.value)}
+              placeholder={`[my_drive]\ntype = drive\ntoken = {"access_token":"..."}\n\n[my_onedrive]\ntype = onedrive\ntoken = {"access_token":"..."}`}
+              className="w-full p-3 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white resize-none"
+            />
+
+            <button
+              type="submit"
+              disabled={importingRclone}
+              className="w-full py-2.5 rounded-xl bg-[#00F0FF] text-black text-xs font-bold inline-flex items-center justify-center gap-2"
+            >
+              {importingRclone && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+              {importingRclone ? 'Verifying All Accounts...' : 'Verify & Mount All Accounts'}
+            </button>
+          </form>
+        </div>
+      )}
     </div>
   );
 };
