@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+.npm/
+
+# Build output
+dist/
+build/
+out/
+
+# Local runtime vault & secrets (do not commit user tokens or uploaded files)
+data/
+*.local
+.env
+.env.*
+!.env.example
+
+# Android build artifacts
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties
+android/app/src/main/assets/public/
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

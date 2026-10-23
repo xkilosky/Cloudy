@@ -1,0 +1,19 @@
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "functions": {
+    "api/index.mjs": {
+      "includeFiles": "{server/**,capacitor.config.json,android/**}"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/index.mjs"
+    },
+    {
+      "source": "/((?!assets/|icons/|sw\\.js|manifest\\.webmanifest|cloudy-logo\\.png|favicon\\.png).*)",
+      "destination": "/index.html"
+    }
+  ]
+}

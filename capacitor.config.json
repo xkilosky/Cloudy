@@ -1,0 +1,13 @@
+{
+  "appId": "com.xkilo.cloudy",
+  "appName": "Cloudy",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https",
+    "cleartext": true
+  },
+  "android": {
+    "allowMixedContent": true,
+    "backgroundColor": "#05080F"
+  }
+}
