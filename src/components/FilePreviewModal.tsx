@@ -1,15 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import {
-  X,
-  Download,
-  Save,
-  CheckCircle2,
-  HardDrive,
-  FolderInput,
-} from 'lucide-react';
+import { X, Download, Save, ExternalLink } from 'lucide-react';
 import type { FileItem, StorageAccount, FolderItem } from '../types';
 import { formatBytes, isTextEditable } from '../lib/format';
 import { getOfflineBlob } from '../lib/offlineDb';
+import { apiFetch } from '../lib/vaultClient';
 
 interface FilePreviewModalProps {
   file: FileItem | null;
@@ -37,31 +31,27 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
   const [textValue, setTextValue] = useState('');
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [savedNotice, setSavedNotice] = useState(false);
 
   useEffect(() => {
     if (!file) return;
     let objectUrl: string | null = null;
-    setSavedNotice(false);
     setTextValue(file.textContent || '');
 
-    async function loadBinaryPreview() {
+    async function loadPreview() {
       if (!file) return;
-      // Always check IndexedDB offline blob first so preview works 100% offline!
       const cached = await getOfflineBlob(file.id);
       if (cached?.blob) {
         objectUrl = URL.createObjectURL(cached.blob);
         setBlobUrl(objectUrl);
         if (!file.textContent && isTextEditable(file.mimeType, file.name)) {
-          const txt = await cached.blob.text();
-          setTextValue(txt);
+          setTextValue(await cached.blob.text());
         }
         return;
       }
 
       if (!isOffline) {
         try {
-          const resp = await fetch(`/api/files/${file.id}/blob`);
+          const resp = await apiFetch(`/api/files/${file.id}/blob`);
           if (resp.ok) {
             const b = await resp.blob();
             objectUrl = URL.createObjectURL(b);
@@ -76,7 +66,7 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
       }
     }
 
-    loadBinaryPreview();
+    loadPreview();
     return () => {
       if (objectUrl) URL.revokeObjectURL(objectUrl);
       setBlobUrl(null);
@@ -95,70 +85,70 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
     setSaving(true);
     try {
       await onSaveContent(file, textValue);
-      setSavedNotice(true);
-      setTimeout(() => setSavedNotice(false), 2500);
     } finally {
       setSaving(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-3 sm:p-6">
-      <div className="w-full max-w-4xl max-h-[90vh] rounded-3xl bg-[#0B1220] border border-slate-800 shadow-2xl flex flex-col overflow-hidden">
-        {/* Top Header */}
-        <div className="px-5 py-4 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 bg-[#080D18]">
+    <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4">
+      <div className="w-full max-w-4xl max-h-[90vh] rounded-2xl bg-[#07090C] border border-white/10 flex flex-col overflow-hidden">
+        {/* Header */}
+        <div className="px-5 py-4 border-b border-white/[0.07] flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <h3 className="text-base font-bold text-white truncate">{file.name}</h3>
-            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400 mt-0.5">
-              <span className="font-mono">{formatBytes(file.size)}</span>
-              <span>·</span>
-              <span className="text-emerald-400 inline-flex items-center gap-1">
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                {isOffline ? 'Loaded from Offline Vault' : 'Synced Online & Offline'}
-              </span>
-              <span>·</span>
-              <span className="font-mono text-[11px] text-slate-500">ID: {file.id}</span>
-            </div>
+            <h3 className="text-sm font-bold text-white truncate">{file.name}</h3>
+            <p className="text-xs text-zinc-500 mt-0.5 font-mono">
+              {formatBytes(file.size)} · {file.providerName}
+            </p>
           </div>
 
           <div className="flex items-center gap-2">
+            {file.webUrl && (
+              <a
+                href={file.webUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="px-3 py-1.5 rounded-xl bg-white/[0.05] hover:bg-white/10 text-xs text-zinc-200 inline-flex items-center gap-1.5"
+              >
+                Cloud Link <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+            )}
             {editable && (
               <button
                 onClick={handleSave}
                 disabled={saving}
-                className="px-3.5 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 transition"
+                className="px-3.5 py-1.5 rounded-xl bg-[#00F0FF] text-black font-bold text-xs inline-flex items-center gap-1.5"
               >
                 <Save className="w-3.5 h-3.5" />
-                {saving ? 'Saving...' : savedNotice ? 'Saved!' : 'Save Changes'}
+                {saving ? 'Saving...' : 'Save'}
               </button>
             )}
             <button
               onClick={() => onDownload(file)}
-              className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-semibold flex items-center gap-1.5 transition"
+              className="px-3 py-1.5 rounded-xl bg-white/[0.06] hover:bg-white/10 text-white text-xs font-medium inline-flex items-center gap-1.5"
             >
               <Download className="w-3.5 h-3.5" />
               Download
             </button>
             <button
               onClick={onClose}
-              className="p-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300"
+              className="p-1.5 rounded-xl text-zinc-500 hover:text-white"
             >
               <X className="w-4 h-4" />
             </button>
           </div>
         </div>
 
-        {/* Metadata Bar: Folder & Cloud Provider Assignment */}
-        <div className="px-5 py-2.5 bg-[#0C1425] border-b border-slate-800/80 flex flex-wrap items-center gap-4 text-xs">
+        {/* Clean Location & Provider Selector */}
+        <div className="px-5 py-2.5 border-b border-white/[0.06] bg-black flex flex-wrap items-center gap-4 text-xs">
           <div className="flex items-center gap-2">
-            <FolderInput className="w-3.5 h-3.5 text-sky-400" />
-            <span className="text-slate-400">Carpeta:</span>
+            <span className="text-zinc-500">Carpeta:</span>
             <select
               value={file.folderId || ''}
               onChange={(e) => onMoveFolder(file, e.target.value || null)}
-              className="px-2.5 py-1 rounded-lg bg-[#060A14] border border-slate-800 text-slate-200"
+              className="px-2.5 py-1 rounded-lg bg-[#080A0E] border border-white/10 text-white"
             >
-              <option value="">/ (Root Drive)</option>
+              <option value="">/ Root</option>
               {folders
                 .filter((f) => !f.trashed)
                 .map((f) => (
@@ -169,18 +159,17 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
             </select>
           </div>
 
-          {!isOffline && (
+          {!isOffline && accounts.length > 1 && (
             <div className="flex items-center gap-2">
-              <HardDrive className="w-3.5 h-3.5 text-emerald-400" />
-              <span className="text-slate-400">Cloud Storage Provider:</span>
+              <span className="text-zinc-500">Storage:</span>
               <select
                 value={file.accountId}
                 onChange={(e) => onMoveProvider(file, e.target.value)}
-                className="px-2.5 py-1 rounded-lg bg-[#060A14] border border-slate-800 text-slate-200"
+                className="px-2.5 py-1 rounded-lg bg-[#080A0E] border border-white/10 text-white"
               >
                 {accounts.map((acc) => (
                   <option key={acc.id} value={acc.id}>
-                    {acc.accountLabel} ({acc.providerName})
+                    {acc.accountLabel}
                   </option>
                 ))}
               </select>
@@ -188,45 +177,40 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
           )}
         </div>
 
-        {/* Content Body */}
-        <div className="flex-1 overflow-auto p-5 bg-[#060A14]">
+        {/* Content */}
+        <div className="flex-1 overflow-auto p-5 bg-black">
           {editable ? (
             <textarea
               value={textValue}
               onChange={(e) => setTextValue(e.target.value)}
               spellCheck={false}
-              className="w-full h-[52vh] p-4 rounded-2xl bg-[#0A1020] border border-slate-800 focus:border-sky-500/60 focus:outline-none font-mono text-xs sm:text-sm text-slate-100 leading-relaxed resize-none"
+              className="w-full h-[54vh] p-4 rounded-xl bg-[#06080B] border border-white/[0.08] focus:border-[#00F0FF] focus:outline-none font-mono text-xs sm:text-sm text-white leading-relaxed resize-none"
             />
           ) : isImage && blobUrl ? (
             <div className="flex items-center justify-center min-h-[40vh]">
               <img
                 src={blobUrl}
                 alt={file.name}
-                className="max-h-[60vh] max-w-full rounded-xl object-contain border border-slate-800"
+                className="max-h-[60vh] max-w-full rounded-xl object-contain"
               />
             </div>
           ) : isAudio && blobUrl ? (
-            <div className="py-16 flex flex-col items-center justify-center">
+            <div className="py-16 flex justify-center">
               <audio controls src={blobUrl} className="w-full max-w-md" />
             </div>
           ) : isVideo && blobUrl ? (
-            <div className="flex items-center justify-center">
+            <div className="flex justify-center">
               <video controls src={blobUrl} className="max-h-[58vh] rounded-xl" />
             </div>
           ) : isPdf && blobUrl ? (
             <iframe
               src={blobUrl}
               title={file.name}
-              className="w-full h-[60vh] rounded-xl border border-slate-800 bg-white"
+              className="w-full h-[60vh] rounded-xl bg-white"
             />
           ) : (
-            <div className="py-16 text-center space-y-3">
-              <p className="text-sm text-slate-300 font-medium">
-                Binary file ready ({file.mimeType || 'application/octet-stream'})
-              </p>
-              <p className="text-xs text-slate-400">
-                Cached locally for offline access. Click Download above to save to your device.
-              </p>
+            <div className="py-16 text-center text-xs text-zinc-400">
+              Binary file ({file.mimeType}). Click Download above to save locally.
             </div>
           )}
         </div>

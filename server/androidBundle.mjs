@@ -13,8 +13,8 @@ export async function getAndroidInfo(req, res) {
       margin: 1,
       width: 200,
       color: {
-        dark: '#38B6FF',
-        light: '#060A14',
+        dark: '#00F0FF',
+        light: '#000000',
       },
     });
 

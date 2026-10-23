@@ -3,11 +3,14 @@ import archiver from 'archiver';
 import {
   loadDb,
   saveDb,
+  findDbByApiKey,
+  getUnsealedAccount,
   readAccountBinary,
   writeAccountBinary,
   selectTargetAccount,
   makeId,
 } from './store.mjs';
+import { downloadFileFromRemoteProvider } from './cloudAdapters.mjs';
 
 export function buildFolderPathMap(folders) {
   const byId = new Map(folders.map((f) => [f.id, f]));
@@ -73,7 +76,7 @@ function recordAiAudit(db, keyObj, method, endpoint, statusCode) {
   if (db.aiAuditLog.length > 60) {
     db.aiAuditLog.length = 60;
   }
-  saveDb();
+  saveDb(db.vaultId);
 }
 
 export function createAiRouter() {
@@ -99,17 +102,16 @@ export function createAiRouter() {
       });
     }
 
-    const db = loadDb();
-    const matched = db.apiKeys.find((k) => k.key === token && k.active !== false);
-    if (!matched) {
+    const found = findDbByApiKey(token);
+    if (!found) {
       return res.status(403).json({
         ok: false,
         error: 'Invalid, paused, or revoked Cloudy AI API key.',
       });
     }
 
-    req.cloudyDb = db;
-    req.aiKey = matched;
+    req.cloudyDb = found.db;
+    req.aiKey = found.matched;
     next();
   });
 
@@ -255,7 +257,7 @@ export function createAiRouter() {
   });
 
   // GET /api/v1/ai/files/:id/content
-  router.get('/files/:id/content', (req, res) => {
+  router.get('/files/:id/content', async (req, res) => {
     const db = req.cloudyDb;
     const { files } = getAllowedScopeForKey(db, req.aiKey);
     const pathMap = buildFolderPathMap(db.folders);
@@ -271,9 +273,17 @@ export function createAiRouter() {
 
     let content = file.textContent;
     if (content == null) {
-      const buf = readAccountBinary(file.accountId, file.id, file.mirrorAccountId);
+      let buf = readAccountBinary(file.accountId, file.id, file.mirrorAccountId);
+      if (!buf && (file.remoteId || file.remotePath)) {
+        const acc = db.accounts.find((a) => a.id === file.accountId);
+        if (acc) {
+          buf = await downloadFileFromRemoteProvider(getUnsealedAccount(acc), file, null, null);
+          if (buf) writeAccountBinary(file.accountId, file.id, buf);
+        }
+      }
       if (buf && isLikelyTextMime(file.mimeType, file.name)) {
         content = buf.toString('utf8');
+        file.textContent = content;
       }
     }
 
@@ -366,7 +376,7 @@ export function createAiRouter() {
     };
 
     db.files.unshift(newFile);
-    saveDb();
+    saveDb(db.vaultId);
     recordAiAudit(db, req.aiKey, 'POST', '/api/v1/ai/files', 201);
 
     res.status(201).json({
@@ -402,7 +412,8 @@ export function isLikelyTextMime(mime = '', filename = '') {
  * can access all synced files & folders completely offline on 127.0.0.1:8765!
  */
 export function streamOfflineAiBundleZip(req, res) {
-  const db = loadDb();
+  const vaultId = req.query.vaultId || req.headers['x-cloudy-vault-id'] || 'default';
+  const db = loadDb(vaultId);
   const archive = archiver('zip', { zlib: { level: 9 } });
 
   res.setHeader('Content-Type', 'application/zip');

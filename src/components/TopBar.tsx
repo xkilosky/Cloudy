@@ -1,124 +1,82 @@
 import React from 'react';
-import {
-  Search,
-  Wifi,
-  WifiOff,
-  RefreshCw,
-  Smartphone,
-  X,
-} from 'lucide-react';
+import { Search, Wifi, WifiOff, X } from 'lucide-react';
 
 interface TopBarProps {
   searchQuery: string;
   onSearchChange: (q: string) => void;
   isOffline: boolean;
-  simulatedOffline: boolean;
-  onToggleSimulatedOffline: () => void;
+  onToggleOffline: () => void;
   pendingSyncCount: number;
-  onSyncNow: () => void;
-  isSyncing: boolean;
-  onOpenAndroidModal: () => void;
 }
 
 export const TopBar: React.FC<TopBarProps> = ({
   searchQuery,
   onSearchChange,
   isOffline,
-  simulatedOffline,
-  onToggleSimulatedOffline,
+  onToggleOffline,
   pendingSyncCount,
-  onSyncNow,
-  isSyncing,
-  onOpenAndroidModal,
 }) => {
   return (
-    <header className="sticky top-0 z-20 border-b border-slate-800/80 bg-[#060A14]/90 backdrop-blur-xl px-4 sm:px-6 py-3">
-      <div className="flex items-center justify-between gap-3">
-        {/* Mobile Brand Mark */}
+    <header className="sticky top-0 z-20 bg-black/85 backdrop-blur-xl border-b border-white/[0.07] px-5 sm:px-8 py-4">
+      <div className="max-w-6xl mx-auto flex items-center justify-between gap-4">
+        {/* Mobile Brand */}
         <div className="flex lg:hidden items-center gap-2.5 shrink-0">
-          <img src="/cloudy-logo.png" alt="Cloudy" className="w-8 h-8 object-contain" />
-          <div>
-            <div className="text-sm font-bold text-white leading-none">CLOUDY</div>
-            <div className="text-[10px] text-sky-400 font-medium">X-Kilo</div>
-          </div>
+          <img src="/cloudy-logo.png" alt="Cloudy" className="w-7 h-7 object-contain" />
+          <span className="text-sm font-bold tracking-wider text-white">CLOUDY</span>
         </div>
 
-        {/* Global Search */}
-        <div className="relative flex-1 max-w-xl">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+        {/* Clean Search Input */}
+        <div className="relative flex-1 max-w-md">
+          <Search className="w-4 h-4 text-zinc-500 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => onSearchChange(e.target.value)}
-            placeholder="Search files, carpetas (folders), tags, or offline AI notes..."
-            className="w-full pl-10 pr-9 py-2 rounded-xl bg-[#0C1322] border border-slate-800 focus:border-sky-500/60 focus:outline-none text-sm text-slate-100 placeholder:text-slate-500 transition"
+            placeholder="Search files & carpetas..."
+            className="w-full pl-10 pr-8 py-2 rounded-xl bg-[#080A0E] border border-white/[0.08] focus:border-[#00F0FF] focus:outline-none text-sm text-white placeholder:text-zinc-600 transition"
           />
           {searchQuery && (
             <button
               onClick={() => onSearchChange('')}
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-white"
-              title="Clear search"
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-zinc-500 hover:text-white"
             >
               <X className="w-3.5 h-3.5" />
             </button>
           )}
         </div>
 
-        {/* Right Controls: Online/Offline Switch + Sync + Android */}
-        <div className="flex items-center gap-2 shrink-0">
-          {/* Online / Offline Mode Pill & Interactive Test Switch */}
-          <button
-            onClick={onToggleSimulatedOffline}
-            title={
-              isOffline
-                ? 'Currently browsing local IndexedDB Offline Vault. Click to reconnect Online & sync.'
-                : 'Online & Synced. Click to test Air-Gapped Offline Mode!'
-            }
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold border transition ${
-              isOffline
-                ? 'bg-amber-500/15 border-amber-500/40 text-amber-300 hover:bg-amber-500/25'
-                : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20'
-            }`}
-          >
-            {isOffline ? (
-              <>
-                <WifiOff className="w-3.5 h-3.5 text-amber-400" />
-                <span className="hidden sm:inline">
-                  Offline Vault {simulatedOffline ? '(Test)' : ''}
+        {/* Clean Online / Offline Pill */}
+        <button
+          onClick={onToggleOffline}
+          title={
+            isOffline
+              ? 'Offline Mode — reading local IndexedDB vault. Click to go Online.'
+              : 'Online & Synced. Click to test Offline Mode.'
+          }
+          className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-medium border transition shrink-0 ${
+            isOffline
+              ? 'bg-[#00F0FF]/10 border-[#00F0FF]/40 text-[#00F0FF]'
+              : 'bg-[#080A0E] border-white/[0.08] text-zinc-300 hover:border-white/20'
+          }`}
+        >
+          {isOffline ? (
+            <>
+              <WifiOff className="w-3.5 h-3.5 text-[#00F0FF]" />
+              <span>Offline Vault</span>
+              {pendingSyncCount > 0 && (
+                <span className="font-mono text-[10px] opacity-80">
+                  ({pendingSyncCount})
                 </span>
-                {pendingSyncCount > 0 && (
-                  <span className="px-1.5 py-0.2 rounded bg-amber-500/30 text-amber-100 font-mono text-[10px]">
-                    {pendingSyncCount} queued
-                  </span>
-                )}
-              </>
-            ) : (
-              <>
-                <Wifi className="w-3.5 h-3.5 text-emerald-400" />
-                <span className="hidden sm:inline">Online · Offline Ready</span>
-              </>
-            )}
-          </button>
-
-          {/* Sync button */}
-          <button
-            onClick={onSyncNow}
-            disabled={isSyncing || isOffline}
-            title="Sync online & offline vaults now"
-            className="p-2 rounded-xl bg-[#0C1322] border border-slate-800 text-slate-300 hover:text-white hover:border-slate-700 disabled:opacity-40 transition"
-          >
-            <RefreshCw className={`w-4 h-4 ${isSyncing ? 'animate-spin text-sky-400' : ''}`} />
-          </button>
-
-          {/* Android Install Button */}
-          <button
-            onClick={onOpenAndroidModal}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gradient-to-r from-sky-500 to-blue-600 hover:from-sky-400 hover:to-blue-500 text-white text-xs font-semibold shadow-md shadow-sky-500/20 transition"
-          >
-            <Smartphone className="w-3.5 h-3.5" />
-            <span className="hidden md:inline">Android App</span>
-          </button>
-        </div>
+              )}
+            </>
+          ) : (
+            <>
+              <span className="w-1.5 h-1.5 rounded-full bg-[#00F0FF] shadow-[0_0_8px_#00F0FF]" />
+              <Wifi className="w-3.5 h-3.5 text-zinc-400 hidden sm:inline" />
+              <span>Online</span>
+            </>
+          )}
+        </button>
       </div>
     </header>
   );

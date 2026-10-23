@@ -1,20 +1,28 @@
 export type AllocationRule = 'most_free' | 'waterfall' | 'by_type' | 'mirror';
 
+export type ProviderAuthMode =
+  | 'oauth2'
+  | 'mega'
+  | 's3'
+  | 'webdav'
+  | 'github'
+  | 'supabase'
+  | 'builtin';
+
 export interface ProviderCatalogItem {
   id: string;
   name: string;
   freeBytes: number;
   freeLabel: string;
-  color: string;
-  accentBg: string;
-  authType: string;
+  authMode: ProviderAuthMode;
   signupUrl: string;
-  authorizeUrl: string;
+  consoleUrl?: string;
+  authorizeUrl?: string;
+  defaultEndpoint?: string;
+  defaultWebdavUrl?: string;
   scopes: string[];
-  category: string;
-  badge: string;
   description: string;
-  liveOAuthConfigured?: boolean;
+  oauthConfigured?: boolean;
 }
 
 export interface StorageAccount {
@@ -25,10 +33,9 @@ export interface StorageAccount {
   email: string;
   quotaBytes: number;
   usedBytes: number;
-  color: string;
+  baseExternalUsedBytes?: number;
+  sealedCredentials?: string | null;
   connectionMode: string;
-  oneTimeOAuth: boolean;
-  hasRefreshToken?: boolean;
   status: string;
   connectedAt: string;
   lastSyncedAt: string;
@@ -38,7 +45,6 @@ export interface FolderItem {
   id: string;
   name: string;
   parentId: string | null;
-  color: string;
   offlinePinned: boolean;
   starred: boolean;
   trashed: boolean;
@@ -57,6 +63,10 @@ export interface FileItem {
   accountId: string;
   providerId: string;
   providerName: string;
+  remoteId?: string | null;
+  remotePath?: string | null;
+  webUrl?: string | null;
+  importedRemote?: boolean;
   mirrorAccountId: string | null;
   offlinePinned: boolean;
   offlineCached?: boolean;
@@ -93,6 +103,7 @@ export interface AiAuditEntry {
 }
 
 export interface VaultState {
+  vaultId?: string;
   settings: {
     allocationRule: AllocationRule;
     autoOfflineSync: boolean;

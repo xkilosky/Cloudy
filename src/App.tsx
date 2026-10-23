@@ -1,7 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import {
-  HardDrive,
-  WifiOff,
+  FolderClosed,
   Cloud,
   KeyRound,
   Smartphone,
@@ -20,10 +19,11 @@ import { FilePreviewModal } from './components/FilePreviewModal';
 import { ProvidersHub } from './components/ProvidersHub';
 import { AiApiKeysView } from './components/AiApiKeysView';
 import {
-  AndroidDownloadModal,
+  AndroidView,
   type BeforeInstallPromptEvent,
-} from './components/AndroidDownloadModal';
+} from './components/AndroidView';
 import { syncVaultState } from './lib/syncEngine';
+import { apiFetch } from './lib/vaultClient';
 import {
   putStoreItem,
   saveOfflineBlob,
@@ -36,21 +36,17 @@ export function App() {
   const [activeTab, setActiveTab] = useState<NavTab>(() => {
     const params = new URLSearchParams(window.location.search);
     const t = params.get('tab');
-    if (t === 'providers' || t === 'ai-keys' || t === 'offline') return t;
-    return 'drive';
+    if (t === 'providers' || t === 'ai-keys' || t === 'android') return t;
+    return 'files';
   });
   const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [previewFile, setPreviewFile] = useState<FileItem | null>(null);
 
-  // Offline / Sync status
   const [simulatedOffline, setSimulatedOffline] = useState(false);
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
-  const [isSyncing, setIsSyncing] = useState(false);
 
-  // Android PWA Install Prompt & Modal
-  const [androidModalOpen, setAndroidModalOpen] = useState(false);
   const [deferredPrompt, setDeferredPrompt] =
     useState<BeforeInstallPromptEvent | null>(null);
   const [swReady, setSwReady] = useState(false);
@@ -63,7 +59,6 @@ export function App() {
 
   const refreshVault = useCallback(
     async (forceOfflineOverride?: boolean) => {
-      setIsSyncing(true);
       try {
         const useOffline =
           forceOfflineOverride !== undefined ? forceOfflineOverride : simulatedOffline;
@@ -73,8 +68,6 @@ export function App() {
         setPendingSyncCount(res.pendingQueueCount);
       } catch (err) {
         console.error('Vault sync error:', err);
-      } finally {
-        setIsSyncing(false);
       }
     },
     [simulatedOffline]
@@ -84,23 +77,22 @@ export function App() {
     refreshVault();
   }, [refreshVault]);
 
-  // Listen to browser online/offline events, OAuth popup callbacks, & Android beforeinstallprompt
   useEffect(() => {
     const handleOnline = () => {
       if (!simulatedOffline) {
         refreshVault(false);
-        showToast('Back online — synced Offline Vault changes!');
+        showToast('Online — synced Offline Vault.');
       }
     };
     const handleOffline = () => {
       setIsOffline(true);
-      showToast('Offline mode active — reading from local IndexedDB Vault.');
+      showToast('Offline Vault active.');
     };
     const handleMessage = (event: MessageEvent) => {
       if (event.data?.type === 'CLOUDY_OAUTH_SUCCESS') {
         refreshVault(false);
         showToast(
-          `Connected ${event.data.account?.providerName || 'Cloud Drive'} via One-Time OAuth!`
+          `Connected ${event.data.account?.accountLabel || 'Cloud Account'}`
         );
       }
     };
@@ -126,23 +118,14 @@ export function App() {
     };
   }, [refreshVault, simulatedOffline]);
 
-  const handleToggleSimulatedOffline = async () => {
+  const handleToggleOffline = async () => {
     const next = !simulatedOffline;
     setSimulatedOffline(next);
     await refreshVault(next);
-    showToast(
-      next
-        ? 'Switched to Offline Vault Mode — test browsing & opening your files offline!'
-        : 'Reconnected Online — all queued offline items synced!'
-    );
+    showToast(next ? 'Offline Vault Mode ON' : 'Online Mode — synced');
   };
 
-  // --- File & Folder Actions (Seamlessly working Online AND Offline!) ---
-  const handleCreateFolder = async (
-    name: string,
-    parentId: string | null,
-    color: string
-  ) => {
+  const handleCreateFolder = async (name: string, parentId: string | null) => {
     const clientFolderId = `fld_${Math.random().toString(36).slice(2, 11)}`;
     const now = new Date().toISOString();
 
@@ -151,7 +134,6 @@ export function App() {
         id: clientFolderId,
         name,
         parentId,
-        color,
         offlinePinned: true,
         starred: false,
         trashed: false,
@@ -163,27 +145,26 @@ export function App() {
       await enqueueOfflineAction({
         id: `q_${Date.now()}`,
         type: 'create_folder',
-        payload: { id: clientFolderId, name, parentId, color, offlinePinned: true },
+        payload: { id: clientFolderId, name, parentId, offlinePinned: true },
         createdAt: now,
       });
       await refreshVault(true);
-      showToast(`Created carpeta "${name}" offline (queued for cloud sync).`);
+      showToast(`Created "${name}" offline`);
       return;
     }
 
-    await fetch('/api/folders', {
+    await apiFetch('/api/folders', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: clientFolderId, name, parentId, color }),
+      body: JSON.stringify({ id: clientFolderId, name, parentId }),
     });
     await refreshVault();
-    showToast(`Created carpeta "${name}" & synced offline.`);
+    showToast(`Created "${name}"`);
   };
 
   const handleUploadFiles = async (
     fileList: FileList | File[],
-    folderId: string | null,
-    accountId: string
+    folderId: string | null
   ) => {
     const arr = Array.from(fileList);
     if (arr.length === 0) return;
@@ -193,7 +174,8 @@ export function App() {
       const coreAcc = vault.accounts[0];
       for (const rawFile of arr) {
         const fid = `fil_${Math.random().toString(36).slice(2, 11)}`;
-        const isTxt = rawFile.type.startsWith('text/') || /\.(md|txt|json|csv)$/i.test(rawFile.name);
+        const isTxt =
+          rawFile.type.startsWith('text/') || /\.(md|txt|json|csv)$/i.test(rawFile.name);
         const textContent = isTxt ? await rawFile.text() : null;
         const item: FileItem = {
           id: fid,
@@ -211,7 +193,7 @@ export function App() {
           pendingOfflineSync: true,
           starred: false,
           trashed: false,
-          tags: ['offline-added'],
+          tags: [],
           textContent,
           createdAt: now,
           updatedAt: now,
@@ -227,22 +209,23 @@ export function App() {
         });
       }
       await refreshVault(true);
-      showToast(`Cached ${arr.length} file(s) offline — will upload when online.`);
+      showToast(`Saved ${arr.length} file(s) offline`);
       return;
     }
 
     const fd = new FormData();
     for (const f of arr) fd.append('files', f);
     if (folderId) fd.append('folderId', folderId);
-    fd.append('accountId', accountId);
 
-    const res = await fetch('/api/files/upload', { method: 'POST', body: fd });
-    if (res.ok) {
-      const data = await res.json();
-      await refreshVault();
-      const firstProvider = data.files?.[0]?.providerName || 'Cloud Pool';
-      showToast(`Uploaded ${arr.length} file(s) → ${firstProvider} & cached offline!`);
+    const res = await apiFetch('/api/files/upload', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (!res.ok) {
+      showToast(`Upload failed: ${data.error || 'Error'}`);
+      return;
     }
+    await refreshVault();
+    const dest = data.files?.[0]?.providerName || 'Storage';
+    showToast(`Uploaded to ${dest}`);
   };
 
   const handleCreateNote = async (
@@ -250,9 +233,7 @@ export function App() {
     content: string,
     mimeType: string,
     kind: 'note' | 'dataset',
-    folderId: string | null,
-    accountId: string,
-    tags: string[]
+    folderId: string | null
   ) => {
     const id = `fil_${Math.random().toString(36).slice(2, 11)}`;
     const now = new Date().toISOString();
@@ -276,7 +257,7 @@ export function App() {
         pendingOfflineSync: true,
         starred: false,
         trashed: false,
-        tags,
+        tags: [],
         textContent: content,
         createdAt: now,
         updatedAt: now,
@@ -286,21 +267,26 @@ export function App() {
       await enqueueOfflineAction({
         id: `q_${Date.now()}_${id}`,
         type: 'create_note',
-        payload: { id, name, content, mimeType, kind, folderId, accountId, tags },
+        payload: { id, name, content, mimeType, kind, folderId },
         createdAt: now,
       });
       await refreshVault(true);
-      showToast(`Saved "${name}" to local Offline Vault!`);
+      showToast(`Saved "${name}" offline`);
       return;
     }
 
-    await fetch('/api/files/note', {
+    const res = await apiFetch('/api/files/note', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, name, content, mimeType, kind, folderId, accountId, tags }),
+      body: JSON.stringify({ id, name, content, mimeType, kind, folderId }),
     });
+    const data = await res.json();
+    if (!res.ok) {
+      showToast(`Save error: ${data.error || 'Error'}`);
+      return;
+    }
     await refreshVault();
-    showToast(`Created "${name}" & synced for offline AI access!`);
+    showToast(`Saved "${name}" → ${data.file?.providerName || 'Vault'}`);
   };
 
   const handleSaveFileContent = async (file: FileItem, updatedText: string) => {
@@ -325,11 +311,11 @@ export function App() {
       });
       setPreviewFile(updated);
       await refreshVault(true);
-      showToast('Saved changes offline — queued for cloud sync.');
+      showToast('Saved offline');
       return;
     }
 
-    const res = await fetch(`/api/files/${file.id}`, {
+    const res = await apiFetch(`/api/files/${file.id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ textContent: updatedText }),
@@ -339,11 +325,11 @@ export function App() {
       await saveOfflineBlob(file.id, blob, data.file.updatedAt);
       setPreviewFile(data.file);
       await refreshVault();
+      showToast('Saved');
     }
   };
 
   const handleDownloadFile = async (file: FileItem) => {
-    // Prefer local IndexedDB blob so download works instantaneously offline & online!
     const cached = await getOfflineBlob(file.id);
     if (cached?.blob) {
       const url = URL.createObjectURL(cached.blob);
@@ -364,15 +350,21 @@ export function App() {
       setTimeout(() => URL.revokeObjectURL(url), 1000);
       return;
     }
-    window.open(`/api/files/${file.id}/blob?download=1`, '_blank');
+    const resp = await apiFetch(`/api/files/${file.id}/blob?download=1`);
+    if (resp.ok) {
+      const b = await resp.blob();
+      const url = URL.createObjectURL(b);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = file.name;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
   };
 
   const handlePatchFile = async (fileId: string, body: Record<string, unknown>) => {
-    if (isOffline) {
-      showToast('Reconnect online to change cloud provider or trash items.');
-      return;
-    }
-    const res = await fetch(`/api/files/${fileId}`, {
+    if (isOffline) return;
+    const res = await apiFetch(`/api/files/${fileId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -387,11 +379,9 @@ export function App() {
   const handleTrashOrDeleteFile = async (file: FileItem, permanent = false) => {
     if (isOffline) return;
     if (permanent) {
-      await fetch(`/api/files/${file.id}`, { method: 'DELETE' });
-      showToast(`Deleted "${file.name}" permanently.`);
+      await apiFetch(`/api/files/${file.id}`, { method: 'DELETE' });
     } else {
       await handlePatchFile(file.id, { trashed: true });
-      showToast(`Moved "${file.name}" to Trash.`);
     }
     await refreshVault();
   };
@@ -399,9 +389,9 @@ export function App() {
   const handleTrashOrDeleteFolder = async (folder: FolderItem, permanent = false) => {
     if (isOffline) return;
     if (permanent) {
-      await fetch(`/api/folders/${folder.id}`, { method: 'DELETE' });
+      await apiFetch(`/api/folders/${folder.id}`, { method: 'DELETE' });
     } else {
-      await fetch(`/api/folders/${folder.id}`, {
+      await apiFetch(`/api/folders/${folder.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ trashed: true }),
@@ -411,72 +401,68 @@ export function App() {
     await refreshVault();
   };
 
-  // --- Providers & OAuth ---
-  const handleConnectProvider = async (
+  // --- Real Cloud Account Connections ---
+  const handleConnectCredentials = async (
     providerId: string,
-    email: string,
-    accountLabel: string
+    credentials: Record<string, string>
   ) => {
-    const res = await fetch(`/api/oauth/${providerId}/one-time-connect`, {
+    const res = await apiFetch('/api/accounts/connect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, accountLabel }),
+      body: JSON.stringify({ providerId, credentials }),
     });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || 'Failed to verify storage credentials');
+    }
+    await refreshVault();
+    showToast(
+      `Connected ${data.account.accountLabel} (${data.importedFilesCount || 0} remote files synced)`
+    );
+  };
+
+  const handleSyncAccount = async (accountId: string) => {
+    const res = await apiFetch(`/api/accounts/${accountId}/sync`, {
+      method: 'POST',
+    });
+    const data = await res.json();
     if (res.ok) {
-      const data = await res.json();
       await refreshVault();
-      showToast(
-        `Connected ${data.account.accountLabel} via One-Time OAuth!`
-      );
+      showToast(`Synced ${data.importedCount || 0} new remote file(s)`);
     }
   };
 
   const handleDisconnectAccount = async (accountId: string) => {
-    await fetch(`/api/accounts/${accountId}`, { method: 'DELETE' });
+    await apiFetch(`/api/accounts/${accountId}`, { method: 'DELETE' });
     await refreshVault();
-    showToast('Disconnected cloud drive (files kept safe in Cloudy Core Vault).');
+    showToast('Disconnected account');
   };
 
   const handleUpdateRule = async (allocationRule: AllocationRule) => {
-    await fetch('/api/vault/settings', {
+    await apiFetch('/api/vault/settings', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ allocationRule }),
     });
     await refreshVault();
-    showToast(`Updated storage rule: ${allocationRule.replace('_', ' ')}`);
   };
 
-  const handleSaveLiveOAuthApp = async (
-    providerId: string,
-    clientId: string,
-    clientSecret: string
-  ) => {
-    await fetch(`/api/oauth/config/${providerId}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ clientId, clientSecret }),
-    });
-    await refreshVault();
-  };
-
-  // --- AI API Keys ---
   const handleCreateAiKey = async (
     name: string,
     scope: 'read' | 'read_write',
     allowedFolderIds: string[]
   ) => {
-    await fetch('/api/ai-keys', {
+    await apiFetch('/api/ai-keys', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, scope, allowedFolderIds }),
     });
     await refreshVault();
-    showToast(`Generated AI API key "${name}"!`);
+    showToast(`Created key "${name}"`);
   };
 
   const handleToggleKeyActive = async (key: AiApiKey) => {
-    await fetch(`/api/ai-keys/${key.id}`, {
+    await apiFetch(`/api/ai-keys/${key.id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ active: !key.active }),
@@ -485,9 +471,8 @@ export function App() {
   };
 
   const handleDeleteKey = async (keyId: string) => {
-    await fetch(`/api/ai-keys/${keyId}`, { method: 'DELETE' });
+    await apiFetch(`/api/ai-keys/${keyId}`, { method: 'DELETE' });
     await refreshVault();
-    showToast('Revoked AI API key.');
   };
 
   const handleTriggerPwaInstall = async () => {
@@ -499,53 +484,43 @@ export function App() {
 
   if (!vault) {
     return (
-      <div className="min-h-screen bg-[#05080F] flex flex-col items-center justify-center gap-4">
+      <div className="min-h-screen bg-black flex flex-col items-center justify-center gap-3">
         <img
           src="/cloudy-logo.png"
           alt="Cloudy"
-          className="w-16 h-16 object-contain animate-pulse"
+          className="w-12 h-12 object-contain"
         />
-        <div className="text-sm font-semibold text-slate-300">
-          Initializing Cloudy Vault by X-Kilo...
-        </div>
+        <div className="text-xs font-mono text-zinc-500">CLOUDY · X-KILO</div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen flex bg-[#05080F] text-slate-100 cloudy-grid-bg">
-      {/* Desktop Sidebar */}
+    <div className="min-h-screen flex bg-black text-white">
       <Sidebar
         activeTab={activeTab}
         onSelectTab={setActiveTab}
-        currentFolderId={currentFolderId}
-        onSelectFolder={setCurrentFolderId}
+        onResetFolder={() => setCurrentFolderId(null)}
         vault={vault}
-        onOpenAndroidModal={() => setAndroidModalOpen(true)}
       />
 
-      {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0 pb-20 lg:pb-0">
         <TopBar
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
           isOffline={isOffline}
-          simulatedOffline={simulatedOffline}
-          onToggleSimulatedOffline={handleToggleSimulatedOffline}
+          onToggleOffline={handleToggleOffline}
           pendingSyncCount={pendingSyncCount}
-          onSyncNow={() => refreshVault()}
-          isSyncing={isSyncing}
-          onOpenAndroidModal={() => setAndroidModalOpen(true)}
         />
 
         {activeTab === 'providers' ? (
           <ProvidersHub
             vault={vault}
             isOffline={isOffline}
-            onConnectProvider={handleConnectProvider}
+            onConnectCredentials={handleConnectCredentials}
+            onSyncAccount={handleSyncAccount}
             onDisconnectAccount={handleDisconnectAccount}
             onUpdateAllocationRule={handleUpdateRule}
-            onSaveLiveOAuthApp={handleSaveLiveOAuthApp}
           />
         ) : activeTab === 'ai-keys' ? (
           <AiApiKeysView
@@ -556,9 +531,14 @@ export function App() {
             onDeleteKey={handleDeleteKey}
             onRefreshState={() => refreshVault()}
           />
+        ) : activeTab === 'android' ? (
+          <AndroidView
+            deferredPrompt={deferredPrompt}
+            onTriggerPwaInstall={handleTriggerPwaInstall}
+            swReady={swReady}
+          />
         ) : (
           <DriveExplorer
-            mode={activeTab}
             vault={vault}
             currentFolderId={currentFolderId}
             onSelectFolder={setCurrentFolderId}
@@ -569,25 +549,20 @@ export function App() {
             onCreateNote={handleCreateNote}
             onOpenFile={setPreviewFile}
             onDownloadFile={handleDownloadFile}
-            onToggleStarFile={(f) => handlePatchFile(f.id, { starred: !f.starred })}
-            onToggleOfflineFile={(f) =>
-              handlePatchFile(f.id, { offlinePinned: !f.offlinePinned })
-            }
             onTrashOrDeleteFile={handleTrashOrDeleteFile}
             onRestoreFile={(f) => handlePatchFile(f.id, { trashed: false })}
             onTrashOrDeleteFolder={handleTrashOrDeleteFolder}
-            onOpenProvidersTab={() => setActiveTab('providers')}
           />
         )}
       </div>
 
-      {/* Mobile / Android Bottom Navigation Bar */}
-      <nav className="fixed bottom-0 inset-x-0 z-30 lg:hidden bg-[#080D1A]/95 backdrop-blur-xl border-t border-slate-800 px-2 py-1.5 flex items-center justify-around">
+      {/* Minimalist OLED Mobile Bottom Nav */}
+      <nav className="fixed bottom-0 inset-x-0 z-30 lg:hidden bg-black/95 backdrop-blur-xl border-t border-white/[0.08] px-2 py-2 flex items-center justify-around">
         {[
-          { id: 'drive' as NavTab, label: 'Carpetas', icon: HardDrive },
-          { id: 'offline' as NavTab, label: 'Offline', icon: WifiOff },
-          { id: 'providers' as NavTab, label: 'Free GB', icon: Cloud },
-          { id: 'ai-keys' as NavTab, label: 'AI Keys', icon: KeyRound },
+          { id: 'files' as NavTab, label: 'Files', icon: FolderClosed },
+          { id: 'providers' as NavTab, label: 'Storage', icon: Cloud },
+          { id: 'ai-keys' as NavTab, label: 'AI API', icon: KeyRound },
+          { id: 'android' as NavTab, label: 'Android', icon: Smartphone },
         ].map((item) => {
           const Icon = item.icon;
           const active = activeTab === item.id;
@@ -595,8 +570,8 @@ export function App() {
             <button
               key={item.id}
               onClick={() => setActiveTab(item.id)}
-              className={`flex flex-col items-center gap-0.5 px-3 py-1.5 rounded-xl text-[11px] font-semibold transition ${
-                active ? 'text-sky-400' : 'text-slate-400'
+              className={`flex flex-col items-center gap-1 px-4 py-1 rounded-xl text-[11px] font-medium transition ${
+                active ? 'text-[#00F0FF]' : 'text-zinc-500'
               }`}
             >
               <Icon className="w-5 h-5" />
@@ -604,16 +579,8 @@ export function App() {
             </button>
           );
         })}
-        <button
-          onClick={() => setAndroidModalOpen(true)}
-          className="flex flex-col items-center gap-0.5 px-3 py-1.5 rounded-xl text-[11px] font-semibold text-emerald-400"
-        >
-          <Smartphone className="w-5 h-5" />
-          <span>APK</span>
-        </button>
       </nav>
 
-      {/* File Preview & Inline Editor Modal */}
       <FilePreviewModal
         file={previewFile}
         accounts={vault.accounts}
@@ -623,27 +590,16 @@ export function App() {
         onSaveContent={handleSaveFileContent}
         onMoveProvider={async (f, targetAccountId) => {
           await handlePatchFile(f.id, { targetAccountId });
-          showToast('Migrated file to selected cloud provider!');
+          showToast('Moved to selected storage account');
         }}
         onMoveFolder={async (f, folderId) => {
           await handlePatchFile(f.id, { folderId });
-          showToast('Moved file to carpeta!');
         }}
         onDownload={handleDownloadFile}
       />
 
-      {/* Android PWA + APK Download Modal */}
-      <AndroidDownloadModal
-        open={androidModalOpen}
-        onClose={() => setAndroidModalOpen(false)}
-        deferredPrompt={deferredPrompt}
-        onTriggerPwaInstall={handleTriggerPwaInstall}
-        swReady={swReady}
-      />
-
-      {/* Toast Notification */}
       {toast && (
-        <div className="fixed bottom-20 lg:bottom-6 right-4 sm:right-6 z-50 px-4 py-2.5 rounded-2xl bg-[#0E182D] border border-sky-500/40 text-xs font-semibold text-sky-100 shadow-2xl">
+        <div className="fixed bottom-20 lg:bottom-6 right-5 z-50 px-4 py-2.5 rounded-xl bg-[#07090C] border border-[#00F0FF]/40 text-xs font-medium text-[#00F0FF] shadow-2xl">
           {toast}
         </div>
       )}
