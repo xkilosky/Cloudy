@@ -22,7 +22,18 @@ export const FREE_PROVIDER_CATALOG = [
     consoleUrl: 'https://console.cloud.google.com/apis/credentials',
     authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
     tokenUrl: 'https://oauth2.googleapis.com/token',
-    scopes: ['https://www.googleapis.com/auth/drive'],
+    scopes: [
+      'openid',
+      'email',
+      'profile',
+      'https://www.googleapis.com/auth/drive.file',
+    ],
+    fullScopes: [
+      'openid',
+      'email',
+      'profile',
+      'https://www.googleapis.com/auth/drive',
+    ],
     extraAuthParams: { access_type: 'offline', prompt: 'consent' },
     description: 'Connect your real 15 GB Google Drive via OAuth 2.0 (persistent refresh token) or OAuth token.',
   },
@@ -217,7 +228,13 @@ function decodeSignedState(stateStr) {
   return parsed;
 }
 
-export function buildUpstreamOAuthUrl(provider, oauthConfig, redirectUri, vaultId = 'default') {
+export function buildUpstreamOAuthUrl(
+  provider,
+  oauthConfig,
+  redirectUri,
+  vaultId = 'default',
+  scopeMode = 'default'
+) {
   const verifier = crypto.randomBytes(32).toString('base64url');
   const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
 
@@ -237,8 +254,13 @@ export function buildUpstreamOAuthUrl(provider, oauthConfig, redirectUri, vaultI
   url.searchParams.set('response_type', 'code');
   url.searchParams.set('state', state);
 
-  if (provider.scopes?.length) {
-    url.searchParams.set('scope', provider.scopes.join(' '));
+  const chosenScopes =
+    scopeMode === 'full' && provider.fullScopes?.length
+      ? provider.fullScopes
+      : provider.scopes;
+
+  if (chosenScopes?.length) {
+    url.searchParams.set('scope', chosenScopes.join(' '));
   }
   if (provider.extraAuthParams) {
     for (const [k, v] of Object.entries(provider.extraAuthParams)) {

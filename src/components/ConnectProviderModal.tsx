@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { X, ExternalLink, Copy, Check, AlertCircle, Loader2 } from 'lucide-react';
 import type { ProviderCatalogItem } from '../types';
 import { getOrCreateVaultId } from '../lib/vaultClient';
@@ -21,8 +21,10 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [copiedUri, setCopiedUri] = useState(false);
+  const [editingOAuthKeys, setEditingOAuthKeys] = useState(false);
+  const [fullDriveScope, setFullDriveScope] = useState(false);
 
-  // Form states across auth modes
+  // OAuth2 keys persisted per provider in localStorage so multi-account pooling is 1-click
   const [clientId, setClientId] = useState('');
   const [clientSecret, setClientSecret] = useState('');
   const [accessToken, setAccessToken] = useState('');
@@ -53,9 +55,31 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
   const [sbKey, setSbKey] = useState('');
   const [sbBucket, setSbBucket] = useState('cloudy-vault');
 
+  useEffect(() => {
+    if (!provider) return;
+    setErrorMsg(null);
+    setEditingOAuthKeys(false);
+    try {
+      const raw = localStorage.getItem(`cloudy_oauth_app_${provider.id}`);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        setClientId(parsed.clientId || '');
+        setClientSecret(parsed.clientSecret || '');
+      } else {
+        setClientId('');
+        setClientSecret('');
+      }
+    } catch {
+      setClientId('');
+      setClientSecret('');
+    }
+  }, [provider]);
+
   if (!provider) return null;
 
   const callbackUri = `${window.location.origin}/api/oauth/callback`;
+  const hasSavedKeys = Boolean(provider.oauthConfigured || clientId.trim());
+  const showOAuthKeyInputs = !hasSavedKeys || editingOAuthKeys;
 
   const copyCallback = () => {
     navigator.clipboard.writeText(callbackUri);
@@ -70,14 +94,30 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
       setErrorMsg(`Enter your ${provider.name} OAuth Client ID to initiate OAuth 2.0.`);
       return;
     }
+
+    if (clientId.trim()) {
+      try {
+        localStorage.setItem(
+          `cloudy_oauth_app_${provider.id}`,
+          JSON.stringify({
+            clientId: clientId.trim(),
+            clientSecret: clientSecret.trim(),
+          })
+        );
+      } catch {
+        // ignore storage quota errors
+      }
+    }
+
     const qs = new URLSearchParams({
       vaultId: getOrCreateVaultId(),
+      scopeMode: fullDriveScope ? 'full' : 'default',
     });
     if (clientId.trim()) qs.set('clientId', clientId.trim());
     if (clientSecret.trim()) qs.set('clientSecret', clientSecret.trim());
 
     const width = 520;
-    const height = 660;
+    const height = 680;
     const left = window.screenX + (window.outerWidth - width) / 2;
     const top = window.screenY + (window.outerHeight - height) / 2;
 
@@ -141,7 +181,7 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4">
-      <div className="w-full max-w-md rounded-2xl bg-[#07090C] border border-white/10 p-6 space-y-5 shadow-2xl">
+      <div className="w-full max-w-md rounded-2xl bg-[#07090C] border border-white/10 p-6 space-y-5 shadow-2xl max-h-[92vh] overflow-y-auto">
         {/* Header */}
         <div className="flex items-start justify-between gap-3">
           <div>
@@ -197,7 +237,40 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
 
             {oauthTab === 'redirect' ? (
               <form onSubmit={handleLaunchRealOAuth} className="space-y-3.5">
-                {!provider.oauthConfigured && (
+                {provider.id === 'google_drive' && (
+                  <div className="p-3 rounded-xl bg-black border border-[#00F0FF]/25 space-y-2 text-[11px] text-zinc-300 leading-relaxed">
+                    <div className="font-semibold text-[#00F0FF]">
+                      Avoid Google &ldquo;Testing / Verificación&rdquo; Block:
+                    </div>
+                    <div>
+                      1. In{' '}
+                      <a
+                        href="https://console.cloud.google.com/auth/audience"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-[#00F0FF] underline"
+                      >
+                        Google Auth → Audience (Público)
+                      </a>
+                      , click <strong>Publish App (&ldquo;Publicar aplicación&rdquo;)</strong>{' '}
+                      or add your Gmail under <strong>Test users</strong>.
+                    </div>
+                    <div>
+                      2. Ensure{' '}
+                      <a
+                        href="https://console.cloud.google.com/apis/library/drive.googleapis.com"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-[#00F0FF] underline"
+                      >
+                        Google Drive API
+                      </a>{' '}
+                      is enabled.
+                    </div>
+                  </div>
+                )}
+
+                {showOAuthKeyInputs ? (
                   <>
                     <div className="p-3 rounded-xl bg-black border border-white/[0.07] space-y-2 text-xs">
                       <div className="flex items-center justify-between text-zinc-400">
@@ -235,7 +308,7 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
 
                     <input
                       type="text"
-                      required
+                      required={!provider.oauthConfigured}
                       value={clientId}
                       onChange={(e) => setClientId(e.target.value)}
                       placeholder={`${provider.name} OAuth Client ID`}
@@ -245,10 +318,35 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
                       type="password"
                       value={clientSecret}
                       onChange={(e) => setClientSecret(e.target.value)}
-                      placeholder="Client Secret (if required by app)"
+                      placeholder="Client Secret (required for Web OAuth clients)"
                       className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
                     />
                   </>
+                ) : (
+                  <div className="flex items-center justify-between px-3.5 py-2.5 rounded-xl bg-black border border-white/[0.08] text-xs">
+                    <span className="text-zinc-300">OAuth Client Configured</span>
+                    <button
+                      type="button"
+                      onClick={() => setEditingOAuthKeys(true)}
+                      className="text-[#00F0FF] hover:underline font-medium"
+                    >
+                      Edit Keys
+                    </button>
+                  </div>
+                )}
+
+                {provider.id === 'google_drive' && (
+                  <label className="flex items-center gap-2 text-[11px] text-zinc-400 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={fullDriveScope}
+                      onChange={(e) => setFullDriveScope(e.target.checked)}
+                      className="accent-[#00F0FF] rounded"
+                    />
+                    <span>
+                      Also list pre-existing Drive files (requires Gmail added in Test Users)
+                    </span>
+                  </label>
                 )}
 
                 <button
@@ -260,6 +358,16 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
               </form>
             ) : (
               <form onSubmit={handleSubmitDirect} className="space-y-3">
+                {provider.id === 'google_drive' && (
+                  <a
+                    href="https://developers.google.com/oauthplayground/#step1&apisSelect=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive&url=https%3A%2F%2F&content_type=application%2Fjson&http_method=GET"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-xs text-[#00F0FF] hover:underline inline-flex items-center gap-1"
+                  >
+                    Generate instant token via Google OAuth Playground <ExternalLink className="w-3 h-3" />
+                  </a>
+                )}
                 <input
                   type="password"
                   required

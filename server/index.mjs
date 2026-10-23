@@ -263,7 +263,8 @@ app.get('/api/oauth/:providerId/authorize', (req, res) => {
   }
 
   const redirectUri = `${req.protocol}://${req.get('host')}/api/oauth/callback`;
-  const { authorizeUrl } = buildUpstreamOAuthUrl(meta, cfg, redirectUri, vaultId);
+  const scopeMode = String(req.query.scopeMode || 'default');
+  const { authorizeUrl } = buildUpstreamOAuthUrl(meta, cfg, redirectUri, vaultId, scopeMode);
   return res.redirect(authorizeUrl);
 });
 
@@ -312,13 +313,24 @@ app.get('/api/oauth/callback', async (req, res) => {
       </div>
     </body></html>`);
   } catch (err) {
-    const msg = String(err.message || err).replace(/</g, '&lt;');
+    const rawMsg = String(err.message || err);
+    const msg = rawMsg.replace(/</g, '&lt;');
+    const isAccessDenied = rawMsg.includes('access_denied');
     res.status(400).setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.send(`<!doctype html><html><body style="background:#000;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;padding:24px;">
-      <div style="max-width:460px;border:1px solid #27272a;padding:24px;border-radius:16px;background:#09090b;">
-        <h3 style="color:#f87171;margin-top:0;">OAuth Connection Failed</h3>
-        <p style="color:#a1a1aa;font-size:13px;line-height:1.5;">${msg}</p>
-        <button onclick="window.close()" style="margin-top:12px;padding:8px 16px;background:#00F0FF;color:#000;border:none;border-radius:8px;font-weight:600;cursor:pointer;">Close Window</button>
+    res.send(`<!doctype html><html><body style="background:#000;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;padding:24px;margin:0;">
+      <div style="max-width:480px;border:1px solid #27272a;padding:24px;border-radius:16px;background:#07090C;">
+        <h3 style="color:#f87171;margin-top:0;">OAuth Access Blocked (${msg})</h3>
+        ${
+          isAccessDenied
+            ? `<p style="color:#d4d4d8;font-size:13px;line-height:1.6;">
+                Your Google Cloud OAuth Consent Screen is currently in <strong>Testing (Prueba)</strong> mode. To allow sign-in:
+                <br/><br/>
+                1. Open <a href="https://console.cloud.google.com/auth/audience" target="_blank" style="color:#00F0FF;">Google Cloud → Audience (Público)</a><br/>
+                2. Either click <strong>"Publish App" ("Publicar aplicación")</strong> OR add your Gmail under <strong>"Test users" ("Usuarios de prueba")</strong>.
+              </p>`
+            : `<p style="color:#a1a1aa;font-size:13px;line-height:1.5;">${msg}</p>`
+        }
+        <button onclick="window.close()" style="margin-top:12px;padding:9px 18px;background:#00F0FF;color:#000;border:none;border-radius:10px;font-weight:700;cursor:pointer;">Close Window</button>
       </div>
     </body></html>`);
   }
