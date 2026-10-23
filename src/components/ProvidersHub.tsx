@@ -175,7 +175,9 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
                 100,
                 (acc.usedBytes / Math.max(acc.quotaBytes, 1)) * 100
               );
-              const isCore = acc.providerId === 'xkilo_core';
+              const isCore =
+                acc.providerId === 'xkilo_core' ||
+                acc.connectionMode === 'builtin_cloud';
               return (
                 <div
                   key={acc.id}

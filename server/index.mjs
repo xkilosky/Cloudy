@@ -4,6 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import {
   loadDb,
+  ensureVaultLoaded,
   saveDb,
   selectTargetAccount,
   writeAccountBinary,
@@ -31,6 +32,8 @@ import {
   initNextcloudLoginFlow,
   pollNextcloudLoginFlow,
   parseRcloneConfig,
+  startPublicDeviceFlow,
+  pollPublicDeviceFlow,
 } from './cloudAdapters.mjs';
 import {
   createAiRouter,
@@ -57,6 +60,16 @@ const upload = multer({
 function reqVaultId(req) {
   return normalizeVaultId(req.headers['x-cloudy-vault-id'] || req.query.vaultId || 'default');
 }
+
+// Auto-hydrate vault state from durable Supabase PostgreSQL on serverless cold starts
+app.use('/api', async (req, _res, next) => {
+  try {
+    await ensureVaultLoaded(reqVaultId(req));
+  } catch {
+    // non-fatal fallback to local vault
+  }
+  next();
+});
 
 function getOAuthConfigForProvider(db, providerId) {
   const envClientId = process.env[`${providerId.toUpperCase()}_CLIENT_ID`];
@@ -402,6 +415,48 @@ app.post('/api/nextcloud/login-poll', async (req, res) => {
       usedBytes: verified.usedBytes,
       credentials: verified.credentials,
       connectionMode: 'login_flow_v2',
+    });
+    const importedFilesCount = await importRemoteFilesIntoVault(db, account);
+    res.json({
+      ok: true,
+      pending: false,
+      account: sanitizeAccount(account),
+      importedFilesCount,
+    });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: String(err.message || err) });
+  }
+});
+
+// --- 1-Click OAuth Device Code Flow (GitHub & Microsoft OneDrive — Zero Copy-Paste, Zero App Setup!) ---
+app.post('/api/device-auth/:providerId/start', async (req, res) => {
+  try {
+    const { providerId } = req.params;
+    const flow = await startPublicDeviceFlow(providerId);
+    res.json({ ok: true, ...flow });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: String(err.message || err) });
+  }
+});
+
+app.post('/api/device-auth/:providerId/poll', async (req, res) => {
+  try {
+    const db = loadDb(reqVaultId(req));
+    const { providerId } = req.params;
+    const { deviceCode } = req.body || {};
+    const result = await pollPublicDeviceFlow(providerId, deviceCode);
+    if (result.pending) {
+      return res.json({ ok: true, pending: true });
+    }
+    const verified = await verifyAndInspectProvider(providerId, result.credentials);
+    const account = addVerifiedProviderAccount(db, {
+      providerId,
+      email: verified.email,
+      accountLabel: verified.accountLabel,
+      quotaBytes: verified.quotaBytes,
+      usedBytes: verified.usedBytes,
+      credentials: verified.credentials,
+      connectionMode: 'device_flow',
     });
     const importedFilesCount = await importRemoteFilesIntoVault(db, account);
     res.json({

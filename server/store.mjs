@@ -70,6 +70,47 @@ Free Storage. One System. Your Rules.
 
   const defaultKey = generateApiKeyString();
 
+  const initialAccounts = [
+    {
+      id: coreAccountId,
+      providerId: 'xkilo_core',
+      providerName: 'Local Vault',
+      accountLabel: 'Local Device Vault',
+      email: 'Offline + Local Cache',
+      quotaBytes: 5 * 1024 * 1024 * 1024,
+      usedBytes: buf.byteLength,
+      baseExternalUsedBytes: 0,
+      connectionMode: 'builtin',
+      status: 'connected',
+      connectedAt: now,
+      lastSyncedAt: now,
+    },
+  ];
+
+  // Auto-mount real persistent X-Kilo Cloud Storage (Supabase) with ZERO user setup when configured!
+  if (process.env.CLOUDY_SUPABASE_URL && process.env.CLOUDY_SUPABASE_SERVICE_KEY) {
+    initialAccounts.push({
+      id: `acc_xkilo_cloud_${vaultId.slice(0, 10)}`,
+      providerId: 'supabase_storage',
+      providerName: 'X-Kilo Cloud',
+      accountLabel: 'X-Kilo Cloud (Instant)',
+      email: 'Ready · Zero Setup',
+      quotaBytes: 1 * 1024 * 1024 * 1024,
+      usedBytes: 0,
+      baseExternalUsedBytes: 0,
+      connectionMode: 'builtin_cloud',
+      sealedCredentials: sealCredentials({
+        projectUrl: process.env.CLOUDY_SUPABASE_URL,
+        apiKey: process.env.CLOUDY_SUPABASE_SERVICE_KEY,
+        bucket: 'cloudy-vault',
+        keyPrefix: `${vaultId}/`,
+      }),
+      status: 'connected',
+      connectedAt: now,
+      lastSyncedAt: now,
+    });
+  }
+
   return {
     vaultId,
     settings: {
@@ -77,22 +118,7 @@ Free Storage. One System. Your Rules.
       autoOfflineSync: true,
     },
     oauthApps: {},
-    accounts: [
-      {
-        id: coreAccountId,
-        providerId: 'xkilo_core',
-        providerName: 'Local Vault',
-        accountLabel: 'Local Device Vault',
-        email: 'Offline + Local Cache',
-        quotaBytes: 5 * 1024 * 1024 * 1024,
-        usedBytes: buf.byteLength,
-        baseExternalUsedBytes: 0,
-        connectionMode: 'builtin',
-        status: 'connected',
-        connectedAt: now,
-        lastSyncedAt: now,
-      },
-    ],
+    accounts: initialAccounts,
     folders: [folderAi, folderDocs],
     files: [
       {
@@ -134,6 +160,65 @@ Free Storage. One System. Your Rules.
 }
 
 const memoryVaults = new Map();
+const hydratedFromRemote = new Set();
+
+async function fetchRemoteVaultState(vaultId) {
+  const sbUrl = process.env.CLOUDY_SUPABASE_URL;
+  const sbKey = process.env.CLOUDY_SUPABASE_SERVICE_KEY;
+  if (!sbUrl || !sbKey) return null;
+  try {
+    const res = await fetch(
+      `${sbUrl}/rest/v1/cloudy_vault_states?vault_id=eq.${encodeURIComponent(vaultId)}&select=state_json`,
+      {
+        headers: {
+          apikey: sbKey,
+          Authorization: `Bearer ${sbKey}`,
+        },
+      }
+    );
+    if (!res.ok) return null;
+    const rows = await res.json();
+    return rows?.[0]?.state_json || null;
+  } catch {
+    return null;
+  }
+}
+
+function pushRemoteVaultState(vaultId, db) {
+  const sbUrl = process.env.CLOUDY_SUPABASE_URL;
+  const sbKey = process.env.CLOUDY_SUPABASE_SERVICE_KEY;
+  if (!sbUrl || !sbKey) return;
+  fetch(`${sbUrl}/rest/v1/cloudy_vault_states?on_conflict=vault_id`, {
+    method: 'POST',
+    headers: {
+      apikey: sbKey,
+      Authorization: `Bearer ${sbKey}`,
+      'Content-Type': 'application/json',
+      Prefer: 'resolution=merge-duplicates',
+    },
+    body: JSON.stringify({
+      vault_id: vaultId,
+      state_json: db,
+      updated_at: new Date().toISOString(),
+    }),
+  }).catch(() => {});
+}
+
+export async function ensureVaultLoaded(rawVaultId = 'default') {
+  const vaultId = normalizeVaultId(rawVaultId);
+  if (!hydratedFromRemote.has(vaultId)) {
+    hydratedFromRemote.add(vaultId);
+    const remoteState = await fetchRemoteVaultState(vaultId);
+    if (remoteState && remoteState.accounts) {
+      recalcAccountUsage(remoteState);
+      memoryVaults.set(vaultId, remoteState);
+      const vaultPath = path.join(VAULTS_DIR, `${vaultId}.json`);
+      fs.writeFileSync(vaultPath, JSON.stringify(remoteState, null, 2), 'utf8');
+      return remoteState;
+    }
+  }
+  return loadDb(vaultId);
+}
 
 export function loadDb(rawVaultId = 'default') {
   const vaultId = normalizeVaultId(rawVaultId);
@@ -164,6 +249,7 @@ export function saveDb(rawVaultId = 'default') {
   recalcAccountUsage(db);
   const vaultPath = path.join(VAULTS_DIR, `${vaultId}.json`);
   fs.writeFileSync(vaultPath, JSON.stringify(db, null, 2), 'utf8');
+  pushRemoteVaultState(vaultId, db);
 }
 
 export function findDbByApiKey(token) {

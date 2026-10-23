@@ -810,7 +810,8 @@ export async function uploadFileToRemoteProvider(
   }
 
   if (providerId === 'supabase_storage') {
-    const remotePath = `files/${Date.now()}_${safeName}`;
+    const prefix = creds.keyPrefix || '';
+    const remotePath = `${prefix}files/${Date.now()}_${safeName}`;
     const res = await fetch(
       `${creds.projectUrl}/storage/v1/object/${creds.bucket}/${encodeURI(remotePath)}`,
       {
@@ -1294,4 +1295,87 @@ export function parseRcloneConfig(confText) {
   }
   return mapped;
 }
+
+// --- 1-Click OAuth 2.0 Device Code Flow (GitHub & Microsoft OneDrive — Zero Secrets, Zero Copy-Paste!) ---
+const PUBLIC_DEVICE_CLIENTS = {
+  github_vault: {
+    clientId: process.env.GITHUB_DEVICE_CLIENT_ID || '178c6fc778ccc68e1d6a',
+    deviceCodeUrl: 'https://github.com/login/device/code',
+    tokenUrl: 'https://github.com/login/oauth/access_token',
+    scope: 'repo read:user',
+  },
+  onedrive: {
+    clientId: process.env.ONEDRIVE_DEVICE_CLIENT_ID || '14d82eec-204b-4c2f-b7e8-296a70dab67e',
+    deviceCodeUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/devicecode',
+    tokenUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+    scope: 'Files.ReadWrite offline_access User.Read',
+  },
+};
+
+export async function startPublicDeviceFlow(providerId) {
+  const cfg = PUBLIC_DEVICE_CLIENTS[providerId];
+  if (!cfg) throw new Error(`Device flow not supported for ${providerId}`);
+
+  const res = await fetch(cfg.deviceCodeUrl, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({
+      client_id: cfg.clientId,
+      scope: cfg.scope,
+    }).toString(),
+  });
+  if (!res.ok) {
+    throw new Error(`Device code request failed (${res.status}): ${await res.text()}`);
+  }
+  const data = await res.json();
+  return {
+    deviceCode: data.device_code,
+    userCode: data.user_code,
+    verificationUri: data.verification_uri || data.verification_url,
+    interval: Number(data.interval || 5),
+  };
+}
+
+export async function pollPublicDeviceFlow(providerId, deviceCode) {
+  const cfg = PUBLIC_DEVICE_CLIENTS[providerId];
+  if (!cfg) throw new Error(`Device flow not supported for ${providerId}`);
+
+  const body = new URLSearchParams({
+    client_id: cfg.clientId,
+    device_code: deviceCode,
+    grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+  });
+
+  const res = await fetch(cfg.tokenUrl, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: body.toString(),
+  });
+
+  const data = await res.json();
+  if (data.error) {
+    if (data.error === 'authorization_pending' || data.error === 'slow_down') {
+      return { pending: true };
+    }
+    throw new Error(data.error_description || data.error);
+  }
+
+  return {
+    pending: false,
+    credentials: {
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token || null,
+      expiresAt: data.expires_in ? Date.now() + Number(data.expires_in) * 1000 : null,
+      clientId: cfg.clientId,
+      repoName: 'cloudy-vault',
+    },
+  };
+}
+
 

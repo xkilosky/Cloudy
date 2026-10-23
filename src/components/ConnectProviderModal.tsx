@@ -6,7 +6,6 @@ import {
   Check,
   AlertCircle,
   Loader2,
-  Upload,
   Zap,
 } from 'lucide-react';
 import type { ProviderCatalogItem } from '../types';
@@ -22,57 +21,50 @@ interface ConnectProviderModalProps {
   onConnectedRefresh: (label?: string) => Promise<void>;
 }
 
+const NEXTCLOUD_PRESETS = [
+  { label: 'Tab.Digital (8 GB)', url: 'https://cloud.tab.digital' },
+  { label: 'Disroot Cloud', url: 'https://cloud.disroot.org' },
+];
+
 export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
   provider,
   onClose,
   onConnectCredentials,
   onConnectedRefresh,
 }) => {
-  // Default to ZERO-CONSOLE Instant Connect so users never have to configure OAuth apps!
-  const [oauthTab, setOauthTab] = useState<'instant' | 'custom_oauth'>('instant');
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [copiedCmd, setCopiedCmd] = useState(false);
-  const [copiedUri, setCopiedUri] = useState(false);
+  const [copiedCode, setCopiedCode] = useState(false);
 
-  // Instant smart token / JSON / Service Account input
-  const [smartPayload, setSmartPayload] = useState('');
-  const saFileRef = useRef<HTMLInputElement>(null);
+  // Email + Password (MEGA 20 GB, pCloud 10 GB, Koofr 10 GB, Yandex 5 GB)
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [showMfa, setShowMfa] = useState(false);
+  const [mfaCode, setMfaCode] = useState('');
 
-  // Custom OAuth2 keys (optional secondary tab)
-  const [clientId, setClientId] = useState('');
-  const [clientSecret, setClientSecret] = useState('');
+  // 1-Click Device Flow state (GitHub & Microsoft OneDrive — zero tokens!)
+  const [deviceFlow, setDeviceFlow] = useState<{
+    userCode: string;
+    verificationUri: string;
+  } | null>(null);
 
-  // Email + Password Direct Login (MEGA 20 GB & pCloud 10 GB)
-  const [loginEmail, setLoginEmail] = useState('');
-  const [loginPassword, setLoginPassword] = useState('');
-  const [loginMfa, setLoginMfa] = useState('');
-
-  // Nextcloud 1-Click Login Flow v2
-  const [ncMode, setNcMode] = useState<'flow' | 'manual'>('flow');
+  // Nextcloud 1-Click Browser Login Flow v2
   const [ncServerUrl, setNcServerUrl] = useState('https://cloud.tab.digital');
+  const [ncCustom, setNcCustom] = useState(false);
   const [ncPolling, setNcPolling] = useState(false);
-  const pollTimerRef = useRef<number | null>(null);
 
-  // GitHub
-  const [ghToken, setGhToken] = useState('');
-  const [ghRepo, setGhRepo] = useState('cloudy-vault');
+  // Google Drive / Dropbox / Box simple token
+  const [smartPayload, setSmartPayload] = useState('');
 
-  // S3 (Storj / R2 / B2)
+  // S3 & Supabase
   const [s3Endpoint, setS3Endpoint] = useState('');
+  const [s3Bucket, setS3Bucket] = useState('');
   const [s3AccessKey, setS3AccessKey] = useState('');
   const [s3SecretKey, setS3SecretKey] = useState('');
-  const [s3Bucket, setS3Bucket] = useState('');
-
-  // WebDAV (Koofr / Yandex / Manual Nextcloud)
-  const [webdavUrl, setWebdavUrl] = useState('');
-  const [webdavUser, setWebdavUser] = useState('');
-  const [webdavPass, setWebdavPass] = useState('');
-
-  // Supabase
   const [sbUrl, setSbUrl] = useState('');
   const [sbKey, setSbKey] = useState('');
-  const [sbBucket, setSbBucket] = useState('cloudy-vault');
+
+  const pollTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     return () => {
@@ -83,60 +75,83 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
   useEffect(() => {
     if (!provider) return;
     setErrorMsg(null);
-    setOauthTab('instant');
-    setSmartPayload('');
+    setLoading(false);
+    setDeviceFlow(null);
     setNcPolling(false);
+    setShowMfa(false);
+    setSmartPayload('');
     if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
-
-    try {
-      const raw = localStorage.getItem(`cloudy_oauth_app_${provider.id}`);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        setClientId(parsed.clientId || '');
-        setClientSecret(parsed.clientSecret || '');
-      } else {
-        setClientId('');
-        setClientSecret('');
-      }
-    } catch {
-      setClientId('');
-      setClientSecret('');
-    }
   }, [provider]);
 
   if (!provider) return null;
 
-  const callbackUri = `${window.location.origin}/api/oauth/callback`;
-  const rcloneTypeMap: Record<string, string> = {
-    google_drive: 'drive',
-    dropbox: 'dropbox',
-    onedrive: 'onedrive',
-    box: 'box',
-  };
-  const rcloneCmd = `rclone authorize "${rcloneTypeMap[provider.id] || 'drive'}"`;
+  const isDeviceFlowProvider =
+    provider.id === 'github_vault' || provider.id === 'onedrive';
 
-  const copyText = (txt: string, kind: 'cmd' | 'uri') => {
-    navigator.clipboard.writeText(txt);
-    if (kind === 'cmd') {
-      setCopiedCmd(true);
-      setTimeout(() => setCopiedCmd(false), 2000);
-    } else {
-      setCopiedUri(true);
-      setTimeout(() => setCopiedUri(false), 2000);
+  // --- 1-CLICK SIGN IN FOR GITHUB & MICROSOFT ONEDRIVE (ZERO TYPING!) ---
+  const handleStartDeviceSignIn = async () => {
+    setErrorMsg(null);
+    setLoading(true);
+    try {
+      const res = await apiFetch(`/api/device-auth/${provider.id}/start`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Could not start sign-in');
+
+      setDeviceFlow({
+        userCode: data.userCode,
+        verificationUri: data.verificationUri,
+      });
+
+      try {
+        await navigator.clipboard.writeText(data.userCode);
+        setCopiedCode(true);
+        setTimeout(() => setCopiedCode(false), 3000);
+      } catch {
+        // ignore clipboard denial
+      }
+
+      const width = 520;
+      const height = 660;
+      const left = window.screenX + (window.outerWidth - width) / 2;
+      const top = window.screenY + (window.outerHeight - height) / 2;
+      window.open(
+        data.verificationUri,
+        `cloudy_device_${provider.id}`,
+        `width=${width},height=${height},left=${left},top=${top}`
+      );
+
+      setLoading(false);
+
+      if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
+      const pollMs = Math.max(3000, (data.interval || 5) * 1000);
+      pollTimerRef.current = window.setInterval(async () => {
+        try {
+          const pRes = await apiFetch(`/api/device-auth/${provider.id}/poll`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ deviceCode: data.deviceCode }),
+          });
+          const pData = await pRes.json();
+          if (pData.ok && !pData.pending) {
+            if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
+            setDeviceFlow(null);
+            await onConnectedRefresh(pData.account?.accountLabel || provider.name);
+            onClose();
+          }
+        } catch {
+          // keep polling while user approves in popup
+        }
+      }, pollMs);
+    } catch (err: unknown) {
+      setLoading(false);
+      setErrorMsg(err instanceof Error ? err.message : String(err));
     }
   };
 
-  const handleServiceAccountFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    const txt = await f.text();
-    setSmartPayload(txt);
-    e.target.value = '';
-  };
-
-  // Nextcloud 1-Click Browser Login Flow v2 (Zero OAuth Console!)
-  const handleStartNextcloudFlow = async (e: React.FormEvent) => {
-    e.preventDefault();
+  // --- 1-CLICK SIGN IN FOR NEXTCLOUD (ZERO TYPING!) ---
+  const handleStartNextcloudFlow = async () => {
     setErrorMsg(null);
     setLoading(true);
     try {
@@ -146,10 +161,10 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
         body: JSON.stringify({ serverUrl: ncServerUrl }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Could not start Nextcloud Login Flow');
+      if (!res.ok) throw new Error(data.error || 'Could not start Nextcloud sign-in');
 
       const width = 520;
-      const height = 680;
+      const height = 660;
       const left = window.screenX + (window.outerWidth - width) / 2;
       const top = window.screenY + (window.outerHeight - height) / 2;
       window.open(
@@ -180,7 +195,7 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
             onClose();
           }
         } catch {
-          // keep polling until authorized
+          // keep polling
         }
       }, 2200);
     } catch (err: unknown) {
@@ -190,72 +205,33 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
     }
   };
 
-  const handleLaunchCustomOAuth = (e: React.FormEvent) => {
-    e.preventDefault();
-    setErrorMsg(null);
-    if (!provider.oauthConfigured && !clientId.trim()) {
-      setErrorMsg(`Enter your ${provider.name} OAuth Client ID.`);
-      return;
-    }
-    if (clientId.trim()) {
-      try {
-        localStorage.setItem(
-          `cloudy_oauth_app_${provider.id}`,
-          JSON.stringify({ clientId: clientId.trim(), clientSecret: clientSecret.trim() })
-        );
-      } catch {
-        // ignore
-      }
-    }
-    const qs = new URLSearchParams({ vaultId: getOrCreateVaultId() });
-    if (clientId.trim()) qs.set('clientId', clientId.trim());
-    if (clientSecret.trim()) qs.set('clientSecret', clientSecret.trim());
-
-    const width = 520;
-    const height = 680;
-    const left = window.screenX + (window.outerWidth - width) / 2;
-    const top = window.screenY + (window.outerHeight - height) / 2;
-
-    const popup = window.open(
-      `/api/oauth/${provider.id}/authorize?${qs.toString()}`,
-      `cloudy_oauth_${provider.id}`,
-      `width=${width},height=${height},left=${left},top=${top}`
-    );
-    if (!popup) {
-      window.location.href = `/api/oauth/${provider.id}/authorize?${qs.toString()}`;
-    } else {
-      onClose();
-    }
-  };
-
-  const handleSubmitDirect = async (e: React.FormEvent) => {
+  // --- SUBMIT EMAIL+PASSWORD OR TOKEN ---
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
     setLoading(true);
     try {
       let creds: Record<string, string> = {};
       if (provider.authMode === 'mega' || provider.authMode === 'pcloud') {
-        creds = { email: loginEmail, password: loginPassword, mfaCode: loginMfa };
-      } else if (provider.authMode === 'github') {
-        creds = { accessToken: ghToken.trim(), repoName: ghRepo.trim() || 'cloudy-vault' };
+        creds = { email: email.trim(), password, mfaCode: mfaCode.trim() };
+      } else if (provider.authMode === 'webdav') {
+        creds = {
+          webdavUrl: (provider.defaultWebdavUrl || '').trim(),
+          username: email.trim(),
+          password,
+        };
       } else if (provider.authMode === 's3') {
         creds = {
           endpoint: (s3Endpoint || provider.defaultEndpoint || '').trim(),
+          bucket: s3Bucket.trim(),
           accessKeyId: s3AccessKey.trim(),
           secretAccessKey: s3SecretKey.trim(),
-          bucket: s3Bucket.trim(),
-        };
-      } else if (provider.authMode === 'webdav' || provider.authMode === 'nextcloud') {
-        creds = {
-          webdavUrl: (webdavUrl || provider.defaultWebdavUrl || '').trim(),
-          username: webdavUser.trim(),
-          password: webdavPass,
         };
       } else if (provider.authMode === 'supabase') {
         creds = {
           projectUrl: sbUrl.trim(),
           apiKey: sbKey.trim(),
-          bucket: sbBucket.trim() || 'cloudy-vault',
+          bucket: 'cloudy-vault',
         };
       } else {
         creds = { smartPayload: smartPayload.trim() };
@@ -264,24 +240,51 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
       await onConnectCredentials(provider.id, creds);
       onClose();
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : String(err));
+      const m = err instanceof Error ? err.message : String(err);
+      if (m.toLowerCase().includes('2fa') || m.toLowerCase().includes('mfa')) {
+        setShowMfa(true);
+      }
+      setErrorMsg(m);
     } finally {
       setLoading(false);
     }
   };
 
+  const openGooglePlaygroundPopup = () => {
+    const u =
+      'https://developers.google.com/oauthplayground/#step1&apisSelect=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive&url=https%3A%2F%2F&content_type=application%2Fjson&http_method=GET';
+    const width = 620;
+    const height = 700;
+    const left = window.screenX + (window.outerWidth - width) / 2;
+    const top = window.screenY + (window.outerHeight - height) / 2;
+    window.open(u, 'cloudy_gplayground', `width=${width},height=${height},left=${left},top=${top}`);
+  };
+
+  const launchSavedOAuthPopup = () => {
+    const qs = new URLSearchParams({ vaultId: getOrCreateVaultId() });
+    const width = 520;
+    const height = 660;
+    const left = window.screenX + (window.outerWidth - width) / 2;
+    const top = window.screenY + (window.outerHeight - height) / 2;
+    window.open(
+      `/api/oauth/${provider.id}/authorize?${qs.toString()}`,
+      `cloudy_oauth_${provider.id}`,
+      `width=${width},height=${height},left=${left},top=${top}`
+    );
+    onClose();
+  };
+
   return (
     <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4">
-      <div className="w-full max-w-md rounded-2xl bg-[#07090C] border border-white/10 p-6 space-y-5 shadow-2xl max-h-[92vh] overflow-y-auto">
-        {/* Header */}
+      <div className="w-full max-w-sm rounded-2xl bg-[#07090C] border border-white/10 p-6 space-y-5 shadow-2xl">
+        {/* Clean Minimalist Header */}
         <div className="flex items-start justify-between gap-3">
           <div>
-            <div className="text-[11px] font-mono text-[#00F0FF] uppercase tracking-wider flex items-center gap-1.5">
-              <Zap className="w-3 h-3" />
-              {provider.freeLabel} · No OAuth App Setup Needed
+            <div className="text-[11px] font-mono text-[#00F0FF] uppercase tracking-wider flex items-center gap-1">
+              <Zap className="w-3 h-3" /> {provider.freeLabel}
             </div>
             <h3 className="text-base font-bold text-white mt-0.5">
-              Connect {provider.name}
+              {provider.name}
             </h3>
           </div>
           <button
@@ -299,400 +302,245 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
           </div>
         )}
 
-        {/* --- DIRECT EMAIL + PASSWORD (MEGA 20 GB & pCloud 10 GB — ZERO CONSOLE!) --- */}
-        {(provider.authMode === 'mega' || provider.authMode === 'pcloud') && (
-          <form onSubmit={handleSubmitDirect} className="space-y-3">
-            <p className="text-xs text-zinc-400 leading-relaxed">
-              Sign in directly with your {provider.name} email & password. Cloudy exchanges them for an encrypted session token and never stores your password.
-            </p>
-            <input
-              type="email"
-              required
-              value={loginEmail}
-              onChange={(e) => setLoginEmail(e.target.value)}
-              placeholder={`${provider.name} Email`}
-              className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs text-white"
-            />
-            <input
-              type="password"
-              required
-              value={loginPassword}
-              onChange={(e) => setLoginPassword(e.target.value)}
-              placeholder={`${provider.name} Password`}
-              className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs text-white"
-            />
-            <input
-              type="text"
-              value={loginMfa}
-              onChange={(e) => setLoginMfa(e.target.value)}
-              placeholder="2FA Code (only if 2FA enabled)"
-              className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
-            />
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full py-2.5 rounded-xl bg-[#00F0FF] hover:bg-[#33F3FF] text-black text-xs font-bold inline-flex items-center justify-center gap-2 transition"
-            >
-              {loading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-              {loading ? `Signing in to ${provider.name}...` : `Sign In & Mount ${provider.freeLabel}`}
-            </button>
-          </form>
-        )}
-
-        {/* --- NEXTCLOUD 1-CLICK BROWSER LOGIN FLOW V2 (ZERO CONSOLE!) --- */}
-        {provider.authMode === 'nextcloud' && (
+        {/* === 1. ONE-CLICK POPUP SIGN-IN (GitHub & Microsoft OneDrive — ZERO INPUTS!) === */}
+        {isDeviceFlowProvider && (
           <div className="space-y-4">
-            <div className="grid grid-cols-2 bg-black border border-white/[0.08] rounded-xl p-1 text-xs">
+            {!deviceFlow ? (
               <button
                 type="button"
-                onClick={() => setNcMode('flow')}
-                className={`py-1.5 rounded-lg font-medium transition ${
-                  ncMode === 'flow'
-                    ? 'bg-[#00F0FF] text-black font-semibold'
-                    : 'text-zinc-400 hover:text-white'
-                }`}
+                disabled={loading}
+                onClick={handleStartDeviceSignIn}
+                className="w-full py-3 rounded-xl bg-[#00F0FF] hover:bg-[#33F3FF] text-black text-xs font-bold inline-flex items-center justify-center gap-2 transition"
               >
-                1-Click Browser Login
+                {loading && <Loader2 className="w-4 h-4 animate-spin" />}
+                Sign in with {provider.name}
               </button>
-              <button
-                type="button"
-                onClick={() => setNcMode('manual')}
-                className={`py-1.5 rounded-lg font-medium transition ${
-                  ncMode === 'manual'
-                    ? 'bg-[#00F0FF] text-black font-semibold'
-                    : 'text-zinc-400 hover:text-white'
-                }`}
-              >
-                Manual WebDAV
-              </button>
-            </div>
-
-            {ncMode === 'flow' ? (
-              <form onSubmit={handleStartNextcloudFlow} className="space-y-3">
-                <p className="text-xs text-zinc-400 leading-relaxed">
-                  Enter any Nextcloud server URL (e.g. free 8 GB{' '}
-                  <a
-                    href="https://tab.digital/"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-[#00F0FF] underline"
-                  >
-                    Tab.Digital
-                  </a>{' '}
-                  or{' '}
-                  <a
-                    href="https://user.disroot.org/"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-[#00F0FF] underline"
-                  >
-                    Disroot
-                  </a>
-                  ) and click Sign In — no OAuth keys needed.
-                </p>
-                <input
-                  type="text"
-                  required
-                  value={ncServerUrl}
-                  onChange={(e) => setNcServerUrl(e.target.value)}
-                  placeholder="https://cloud.tab.digital"
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
-                />
-                <button
-                  type="submit"
-                  disabled={loading || ncPolling}
-                  className="w-full py-2.5 rounded-xl bg-[#00F0FF] hover:bg-[#33F3FF] text-black text-xs font-bold inline-flex items-center justify-center gap-2 transition"
-                >
-                  {(loading || ncPolling) && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                  {ncPolling
-                    ? 'Waiting for "Grant Access" in popup...'
-                    : '1-Click Sign In with Nextcloud'}
-                </button>
-              </form>
             ) : (
-              <form onSubmit={handleSubmitDirect} className="space-y-3">
-                <input
-                  type="url"
-                  required
-                  value={webdavUrl}
-                  onChange={(e) => setWebdavUrl(e.target.value)}
-                  placeholder="https://your-nextcloud/remote.php/dav/files/user"
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
-                />
-                <input
-                  type="text"
-                  required
-                  value={webdavUser}
-                  onChange={(e) => setWebdavUser(e.target.value)}
-                  placeholder="Username"
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs text-white"
-                />
-                <input
-                  type="password"
-                  required
-                  value={webdavPass}
-                  onChange={(e) => setWebdavPass(e.target.value)}
-                  placeholder="Password / App Password"
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
-                />
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="w-full py-2.5 rounded-xl bg-[#00F0FF] text-black text-xs font-bold"
-                >
-                  {loading ? 'Verifying...' : 'Connect WebDAV'}
-                </button>
-              </form>
-            )}
-          </div>
-        )}
-
-        {/* --- ZERO-CONSOLE INSTANT CONNECT FOR GOOGLE DRIVE / ONEDRIVE / DROPBOX / BOX --- */}
-        {provider.authMode === 'oauth2' && (
-          <div className="space-y-4">
-            <div className="grid grid-cols-2 bg-black border border-white/[0.08] rounded-xl p-1 text-xs">
-              <button
-                type="button"
-                onClick={() => setOauthTab('instant')}
-                className={`py-1.5 rounded-lg font-medium transition ${
-                  oauthTab === 'instant'
-                    ? 'bg-[#00F0FF] text-black font-semibold'
-                    : 'text-zinc-400 hover:text-white'
-                }`}
-              >
-                Instant (No App Setup)
-              </button>
-              <button
-                type="button"
-                onClick={() => setOauthTab('custom_oauth')}
-                className={`py-1.5 rounded-lg font-medium transition ${
-                  oauthTab === 'custom_oauth'
-                    ? 'bg-[#00F0FF] text-black font-semibold'
-                    : 'text-zinc-400 hover:text-white'
-                }`}
-              >
-                Custom OAuth App
-              </button>
-            </div>
-
-            {oauthTab === 'instant' ? (
-              <form onSubmit={handleSubmitDirect} className="space-y-3.5">
-                {provider.id === 'google_drive' && (
-                  <div className="p-3.5 rounded-xl bg-black border border-[#00F0FF]/25 space-y-2.5 text-xs">
-                    <div className="font-semibold text-white">
-                      Skip Google Cloud Console completely:
-                    </div>
-                    <a
-                      href="https://developers.google.com/oauthplayground/#step1&apisSelect=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive&url=https%3A%2F%2F&content_type=application%2Fjson&http_method=GET"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="w-full py-2 px-3 rounded-lg bg-[#00F0FF]/15 hover:bg-[#00F0FF]/25 text-[#00F0FF] font-semibold inline-flex items-center justify-between transition"
-                    >
-                      <span>1. Authorize in Google Verified Playground</span>
-                      <ExternalLink className="w-3.5 h-3.5" />
-                    </a>
-                    <div className="text-[11px] text-zinc-400 leading-relaxed">
-                      Click blue <strong>Authorize APIs</strong> →{' '}
-                      <strong>Exchange authorization code for tokens</strong> → paste the{' '}
-                      <code className="text-zinc-200">Access token</code> or JSON below.
-                    </div>
-                  </div>
-                )}
-
-                {provider.id === 'onedrive' && (
-                  <div className="p-3 rounded-xl bg-black border border-white/[0.08] space-y-2 text-xs">
-                    <a
-                      href="https://developer.microsoft.com/en-us/graph/graph-explorer"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-[#00F0FF] font-semibold hover:underline inline-flex items-center gap-1"
-                    >
-                      Open Microsoft Verified Graph Explorer <ExternalLink className="w-3.5 h-3.5" />
-                    </a>
-                    <p className="text-[11px] text-zinc-400">
-                      Sign in → click the <strong>Access token</strong> tab → copy & paste below (zero Azure app setup).
-                    </p>
-                  </div>
-                )}
-
-                {provider.id === 'dropbox' && (
-                  <div className="p-3 rounded-xl bg-black border border-white/[0.08] space-y-1.5 text-xs">
-                    <a
-                      href="https://www.dropbox.com/developers/apps"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-[#00F0FF] font-semibold hover:underline inline-flex items-center gap-1"
-                    >
-                      Get 1-Click Generated Access Token <ExternalLink className="w-3.5 h-3.5" />
-                    </a>
-                    <p className="text-[11px] text-zinc-400">
-                      Or paste output from <code className="text-zinc-200">{rcloneCmd}</code> for permanent auto-refresh.
-                    </p>
-                  </div>
-                )}
-
-                {/* Universal 1-Line rclone helper (uses rclone's pre-verified OAuth client!) */}
-                <div className="flex items-center justify-between px-3 py-2 rounded-xl bg-black border border-white/[0.07] text-[11px]">
-                  <span className="font-mono text-zinc-400 truncate">
-                    Permanent CLI: <span className="text-zinc-200">{rcloneCmd}</span>
+              <div className="p-4 rounded-xl bg-black border border-[#00F0FF]/40 text-center space-y-3">
+                <div className="text-[11px] text-zinc-400">
+                  Enter this code in the popup (already copied):
+                </div>
+                <div className="flex items-center justify-center gap-2">
+                  <span className="text-2xl font-mono font-bold tracking-widest text-[#00F0FF]">
+                    {deviceFlow.userCode}
                   </span>
                   <button
                     type="button"
-                    onClick={() => copyText(rcloneCmd, 'cmd')}
-                    className="text-[#00F0FF] shrink-0 ml-2 inline-flex items-center gap-1 font-medium"
+                    onClick={() => {
+                      navigator.clipboard.writeText(deviceFlow.userCode);
+                      setCopiedCode(true);
+                      setTimeout(() => setCopiedCode(false), 2000);
+                    }}
+                    className="p-1.5 rounded-lg bg-white/[0.06] text-zinc-300 hover:text-white"
                   >
-                    {copiedCmd ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                    {copiedCmd ? 'Copied' : 'Copy'}
+                    {copiedCode ? (
+                      <Check className="w-4 h-4 text-[#00F0FF]" />
+                    ) : (
+                      <Copy className="w-4 h-4" />
+                    )}
                   </button>
                 </div>
-
-                <textarea
-                  required
-                  rows={3}
-                  value={smartPayload}
-                  onChange={(e) => setSmartPayload(e.target.value)}
-                  placeholder={
-                    provider.id === 'google_drive'
-                      ? 'Paste Access Token (ya29...), Playground JSON, rclone JSON, or Service Account JSON...'
-                      : `Paste ${provider.name} Access Token or rclone JSON {"access_token":"..."}`
-                  }
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white resize-none"
-                />
-
-                {provider.id === 'google_drive' && (
-                  <div>
-                    <input
-                      ref={saFileRef}
-                      type="file"
-                      accept=".json,application/json"
-                      className="hidden"
-                      onChange={handleServiceAccountFile}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => saFileRef.current?.click()}
-                      className="text-[11px] text-zinc-400 hover:text-[#00F0FF] inline-flex items-center gap-1.5 transition"
-                    >
-                      <Upload className="w-3.5 h-3.5" />
-                      Or upload Google Service Account .json (never expires)
-                    </button>
-                  </div>
-                )}
-
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="w-full py-2.5 rounded-xl bg-[#00F0FF] hover:bg-[#33F3FF] text-black text-xs font-bold inline-flex items-center justify-center gap-2 transition"
-                >
-                  {loading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                  {loading ? 'Verifying Live Quota...' : `Connect ${provider.name} Now`}
-                </button>
-              </form>
-            ) : (
-              <form onSubmit={handleLaunchCustomOAuth} className="space-y-3">
-                <div className="p-3 rounded-xl bg-black border border-white/[0.07] space-y-1.5 text-xs">
-                  <div className="flex items-center justify-between text-zinc-400">
-                    <span>Redirect URI:</span>
-                    <button
-                      type="button"
-                      onClick={() => copyText(callbackUri, 'uri')}
-                      className="text-[#00F0FF] inline-flex items-center gap-1 font-medium"
-                    >
-                      {copiedUri ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                      {copiedUri ? 'Copied' : 'Copy'}
-                    </button>
-                  </div>
-                  <div className="font-mono text-[11px] text-zinc-300 truncate">
-                    {callbackUri}
-                  </div>
+                <div className="flex items-center justify-center gap-2 text-xs text-zinc-400 pt-1">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-[#00F0FF]" />
+                  <span>Waiting for approval...</span>
                 </div>
-                <input
-                  type="text"
-                  required={!provider.oauthConfigured}
-                  value={clientId}
-                  onChange={(e) => setClientId(e.target.value)}
-                  placeholder={`${provider.name} OAuth Client ID`}
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
-                />
-                <input
-                  type="password"
-                  value={clientSecret}
-                  onChange={(e) => setClientSecret(e.target.value)}
-                  placeholder="Client Secret"
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
-                />
-                <button
-                  type="submit"
-                  className="w-full py-2.5 rounded-xl bg-[#00F0FF] text-black text-xs font-bold"
+                <a
+                  href={deviceFlow.verificationUri}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-[11px] text-[#00F0FF] hover:underline inline-flex items-center gap-1"
                 >
-                  Redirect to {provider.name}
-                </button>
-              </form>
+                  Re-open login window <ExternalLink className="w-3 h-3" />
+                </a>
+              </div>
             )}
           </div>
         )}
 
-        {/* --- GITHUB PRIVATE REPO STORAGE (1-CLICK PREFILLED TOKEN) --- */}
-        {provider.authMode === 'github' && (
-          <form onSubmit={handleSubmitDirect} className="space-y-3">
-            {provider.consoleUrl && (
+        {/* === 2. TWO-FIELD EMAIL + PASSWORD SIGN-IN (MEGA 20 GB, pCloud 10 GB, Koofr, Yandex) === */}
+        {(provider.authMode === 'mega' ||
+          provider.authMode === 'pcloud' ||
+          provider.authMode === 'webdav') && (
+          <form onSubmit={handleSubmit} className="space-y-3">
+            <input
+              type="text"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="Email"
+              className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs text-white"
+            />
+            <input
+              type="password"
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder={
+                provider.authMode === 'webdav' ? 'App Password' : 'Password'
+              }
+              className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs text-white"
+            />
+
+            {showMfa && (
+              <input
+                type="text"
+                value={mfaCode}
+                onChange={(e) => setMfaCode(e.target.value)}
+                placeholder="2FA Code"
+                className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
+              />
+            )}
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full py-3 rounded-xl bg-[#00F0FF] hover:bg-[#33F3FF] text-black text-xs font-bold inline-flex items-center justify-center gap-2 transition"
+            >
+              {loading && <Loader2 className="w-4 h-4 animate-spin" />}
+              {loading ? 'Signing in...' : `Sign In (${provider.freeLabel})`}
+            </button>
+
+            {provider.authMode === 'webdav' && provider.consoleUrl && (
               <a
                 href={provider.consoleUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="w-full py-2 px-3 rounded-xl bg-[#00F0FF]/15 hover:bg-[#00F0FF]/25 text-[#00F0FF] text-xs font-semibold inline-flex items-center justify-between transition"
+                className="block text-center text-[11px] text-zinc-400 hover:text-[#00F0FF] transition"
               >
-                <span>1-Click Generate GitHub Token (pre-filled)</span>
-                <ExternalLink className="w-3.5 h-3.5" />
+                Get {provider.name} App Password →
               </a>
             )}
+          </form>
+        )}
+
+        {/* === 3. ONE-CLICK NEXTCLOUD SIGN-IN === */}
+        {provider.authMode === 'nextcloud' && (
+          <div className="space-y-3.5">
+            <div className="flex flex-wrap gap-1.5">
+              {NEXTCLOUD_PRESETS.map((p) => {
+                const active = !ncCustom && ncServerUrl === p.url;
+                return (
+                  <button
+                    key={p.url}
+                    type="button"
+                    onClick={() => {
+                      setNcCustom(false);
+                      setNcServerUrl(p.url);
+                    }}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-medium border transition ${
+                      active
+                        ? 'bg-[#00F0FF]/15 border-[#00F0FF] text-[#00F0FF]'
+                        : 'bg-black border-white/10 text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                );
+              })}
+              <button
+                type="button"
+                onClick={() => setNcCustom(true)}
+                className={`px-3 py-1.5 rounded-xl text-xs font-medium border transition ${
+                  ncCustom
+                    ? 'bg-[#00F0FF]/15 border-[#00F0FF] text-[#00F0FF]'
+                    : 'bg-black border-white/10 text-zinc-400 hover:text-white'
+                }`}
+              >
+                Custom
+              </button>
+            </div>
+
+            {ncCustom && (
+              <input
+                type="text"
+                value={ncServerUrl}
+                onChange={(e) => setNcServerUrl(e.target.value)}
+                placeholder="https://your-nextcloud-server.com"
+                className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
+              />
+            )}
+
+            <button
+              type="button"
+              disabled={loading || ncPolling}
+              onClick={handleStartNextcloudFlow}
+              className="w-full py-3 rounded-xl bg-[#00F0FF] hover:bg-[#33F3FF] text-black text-xs font-bold inline-flex items-center justify-center gap-2 transition"
+            >
+              {(loading || ncPolling) && <Loader2 className="w-4 h-4 animate-spin" />}
+              {ncPolling ? 'Click "Grant Access" in popup...' : '1-Click Sign In'}
+            </button>
+          </div>
+        )}
+
+        {/* === 4. GOOGLE DRIVE / DROPBOX / BOX (CLEAN 2-STEP EXPRESS) === */}
+        {provider.authMode === 'oauth2' && !isDeviceFlowProvider && (
+          <form onSubmit={handleSubmit} className="space-y-3">
+            {provider.oauthConfigured && (
+              <button
+                type="button"
+                onClick={launchSavedOAuthPopup}
+                className="w-full py-3 rounded-xl bg-[#00F0FF] hover:bg-[#33F3FF] text-black text-xs font-bold transition"
+              >
+                1-Click Sign in with {provider.name}
+              </button>
+            )}
+
+            {provider.id === 'google_drive' ? (
+              <button
+                type="button"
+                onClick={openGooglePlaygroundPopup}
+                className="w-full py-2.5 px-3.5 rounded-xl bg-black hover:bg-white/[0.04] border border-[#00F0FF]/40 text-[#00F0FF] text-xs font-bold inline-flex items-center justify-between transition"
+              >
+                <span>1. Authorize Google Account</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </button>
+            ) : (
+              provider.consoleUrl && (
+                <a
+                  href={provider.consoleUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="w-full py-2.5 px-3.5 rounded-xl bg-black hover:bg-white/[0.04] border border-[#00F0FF]/40 text-[#00F0FF] text-xs font-bold inline-flex items-center justify-between transition"
+                >
+                  <span>1. Generate {provider.name} Token</span>
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </a>
+              )
+            )}
+
             <input
               type="password"
               required
-              value={ghToken}
-              onChange={(e) => setGhToken(e.target.value)}
-              placeholder="Paste ghp_... Token"
+              value={smartPayload}
+              onChange={(e) => setSmartPayload(e.target.value)}
+              placeholder="2. Paste Token Here"
               className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
             />
-            <input
-              type="text"
-              value={ghRepo}
-              onChange={(e) => setGhRepo(e.target.value)}
-              placeholder="Private Repository Name (cloudy-vault)"
-              className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
-            />
+
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-2.5 rounded-xl bg-[#00F0FF] text-black text-xs font-bold inline-flex items-center justify-center gap-2"
+              className="w-full py-3 rounded-xl bg-[#00F0FF] hover:bg-[#33F3FF] text-black text-xs font-bold inline-flex items-center justify-center gap-2 transition"
             >
-              {loading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-              {loading ? 'Verifying GitHub...' : 'Mount GitHub Vault'}
+              {loading && <Loader2 className="w-4 h-4 animate-spin" />}
+              {loading ? 'Connecting...' : 'Connect'}
             </button>
           </form>
         )}
 
-        {/* --- S3 COMPATIBLE (Storj 25 GB, R2 10 GB, Backblaze B2 10 GB) --- */}
+        {/* === 5. S3 BUCKETS (Storj / R2 / Backblaze B2) === */}
         {provider.authMode === 's3' && (
-          <form onSubmit={handleSubmitDirect} className="space-y-3">
-            {provider.consoleUrl && (
-              <a
-                href={provider.consoleUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="text-xs text-[#00F0FF] hover:underline inline-flex items-center gap-1"
-              >
-                Get {provider.name} Access Keys <ExternalLink className="w-3 h-3" />
-              </a>
+          <form onSubmit={handleSubmit} className="space-y-2.5">
+            {!provider.defaultEndpoint && (
+              <input
+                type="url"
+                required
+                value={s3Endpoint}
+                onChange={(e) => setS3Endpoint(e.target.value)}
+                placeholder="S3 Endpoint URL"
+                className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
+              />
             )}
-            <input
-              type="url"
-              required
-              value={s3Endpoint || provider.defaultEndpoint || ''}
-              onChange={(e) => setS3Endpoint(e.target.value)}
-              placeholder="S3 Endpoint URL (https://...)"
-              className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
-            />
             <input
               type="text"
               required
@@ -714,77 +562,29 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
               required
               value={s3SecretKey}
               onChange={(e) => setS3SecretKey(e.target.value)}
-              placeholder="Secret Access Key"
+              placeholder="Secret Key"
               className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
             />
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-2.5 rounded-xl bg-[#00F0FF] text-black text-xs font-bold inline-flex items-center justify-center gap-2"
+              className="w-full py-3 rounded-xl bg-[#00F0FF] text-black text-xs font-bold inline-flex items-center justify-center gap-2"
             >
-              {loading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-              {loading ? 'Verifying Bucket...' : `Connect ${provider.name}`}
+              {loading && <Loader2 className="w-4 h-4 animate-spin" />}
+              {loading ? 'Connecting...' : 'Connect Bucket'}
             </button>
           </form>
         )}
 
-        {/* --- WEBDAV (Koofr 10 GB, Yandex Disk 5 GB) --- */}
-        {provider.authMode === 'webdav' && (
-          <form onSubmit={handleSubmitDirect} className="space-y-3">
-            {provider.consoleUrl && (
-              <a
-                href={provider.consoleUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="text-xs text-[#00F0FF] hover:underline inline-flex items-center gap-1"
-              >
-                1-Click Generate {provider.name} App Password <ExternalLink className="w-3 h-3" />
-              </a>
-            )}
-            <input
-              type="url"
-              required
-              value={webdavUrl || provider.defaultWebdavUrl || ''}
-              onChange={(e) => setWebdavUrl(e.target.value)}
-              placeholder="WebDAV Server URL"
-              className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
-            />
-            <input
-              type="text"
-              required
-              value={webdavUser}
-              onChange={(e) => setWebdavUser(e.target.value)}
-              placeholder="Account Email / Username"
-              className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs text-white"
-            />
-            <input
-              type="password"
-              required
-              value={webdavPass}
-              onChange={(e) => setWebdavPass(e.target.value)}
-              placeholder="App Password"
-              className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
-            />
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full py-2.5 rounded-xl bg-[#00F0FF] text-black text-xs font-bold inline-flex items-center justify-center gap-2"
-            >
-              {loading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-              {loading ? 'Verifying...' : `Connect ${provider.name}`}
-            </button>
-          </form>
-        )}
-
-        {/* --- SUPABASE STORAGE (1 GB Free) --- */}
+        {/* === 6. SUPABASE STORAGE === */}
         {provider.authMode === 'supabase' && (
-          <form onSubmit={handleSubmitDirect} className="space-y-3">
+          <form onSubmit={handleSubmit} className="space-y-3">
             <input
               type="url"
               required
               value={sbUrl}
               onChange={(e) => setSbUrl(e.target.value)}
-              placeholder="https://your-project.supabase.co"
+              placeholder="https://project.supabase.co"
               className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
             />
             <input
@@ -792,38 +592,19 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
               required
               value={sbKey}
               onChange={(e) => setSbKey(e.target.value)}
-              placeholder="Supabase Service Role Key"
-              className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
-            />
-            <input
-              type="text"
-              value={sbBucket}
-              onChange={(e) => setSbBucket(e.target.value)}
-              placeholder="Bucket Name (cloudy-vault)"
+              placeholder="Service Role Key"
               className="w-full px-3.5 py-2.5 rounded-xl bg-black border border-white/10 focus:border-[#00F0FF] focus:outline-none text-xs font-mono text-white"
             />
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-2.5 rounded-xl bg-[#00F0FF] text-black text-xs font-bold inline-flex items-center justify-center gap-2"
+              className="w-full py-3 rounded-xl bg-[#00F0FF] text-black text-xs font-bold inline-flex items-center justify-center gap-2"
             >
-              {loading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-              {loading ? 'Verifying Bucket...' : 'Connect Supabase Storage'}
+              {loading && <Loader2 className="w-4 h-4 animate-spin" />}
+              Connect
             </button>
           </form>
         )}
-
-        <div className="pt-2 border-t border-white/[0.06] flex items-center justify-between text-[11px] text-zinc-500">
-          <span>Need a free account?</span>
-          <a
-            href={provider.signupUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="text-zinc-300 hover:text-[#00F0FF] inline-flex items-center gap-1 transition"
-          >
-            Sign up at {provider.name} <ExternalLink className="w-3 h-3" />
-          </a>
-        </div>
       </div>
     </div>
   );
