@@ -747,6 +747,9 @@ export function App() {
                 onToggleKeyActive={handleToggleKeyActive}
                 onDeleteKey={handleDeleteKey}
                 onRefreshState={() => refreshVault()}
+                onSaveGeneratedNote={(name, content, folderId) =>
+                  handleCreateNote(name, content, 'text/markdown', 'note', folderId)
+                }
               />
             ) : activeTab === 'android' ? (
               <AndroidView

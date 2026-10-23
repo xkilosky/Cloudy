@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { motion } from 'framer-motion';
+import React, { useEffect, useState, useCallback } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import {
   Plus,
   Copy,
@@ -9,11 +9,28 @@ import {
   Trash2,
   Play,
   Download,
+  Sparkles,
+  RefreshCw,
+  Send,
+  PlugZap,
+  KeyRound,
+  Cpu,
+  Terminal,
+  Blocks,
+  SlidersHorizontal,
 } from 'lucide-react';
 import type { VaultState, AiApiKey } from '../types';
 import { formatRelativeTime } from '../lib/format';
 import { getOrCreateVaultId } from '../lib/vaultClient';
 import { loadOfflineSnapshot } from '../lib/offlineDb';
+import {
+  detectLocalAiRuntimes,
+  askLocalAiWithVaultSkills,
+  getSavedCustomLocalAiUrl,
+  saveCustomLocalAiUrl,
+  type DetectedLocalModel,
+  type ChatTurnMessage,
+} from '../lib/localAiPlugPlay';
 
 interface AiApiKeysViewProps {
   vault: VaultState;
@@ -26,6 +43,11 @@ interface AiApiKeysViewProps {
   onToggleKeyActive: (key: AiApiKey) => Promise<void>;
   onDeleteKey: (keyId: string) => Promise<void>;
   onRefreshState: () => Promise<void>;
+  onSaveGeneratedNote?: (
+    name: string,
+    content: string,
+    folderId: string | null
+  ) => Promise<void>;
 }
 
 export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
@@ -35,19 +57,49 @@ export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
   onToggleKeyActive,
   onDeleteKey,
   onRefreshState,
+  onSaveGeneratedNote,
 }) => {
+  const [viewMode, setViewMode] = useState<'plug_play' | 'keys_code'>('plug_play');
+
+  // Key selection for Plug & Play
+  const activeKeys = vault.apiKeys.filter((k) => k.active);
+  const [selectedKeyId, setSelectedKeyId] = useState<string>(
+    activeKeys[0]?.id || vault.apiKeys[0]?.id || ''
+  );
+
+  const selectedKeyObj =
+    vault.apiKeys.find((k) => k.id === selectedKeyId && k.active) ||
+    activeKeys[0] ||
+    vault.apiKeys[0] ||
+    null;
+
+  // Local AI runtime auto-discovery state
+  const [scanning, setScanning] = useState(false);
+  const [bridgeRunning, setBridgeRunning] = useState(false);
+  const [bridgeOnlineSync, setBridgeOnlineSync] = useState(false);
+  const [detectedRuntimes, setDetectedRuntimes] = useState<string[]>([]);
+  const [localModels, setLocalModels] = useState<DetectedLocalModel[]>([]);
+  const [selectedModelUid, setSelectedModelUid] = useState<string>('');
+  const [showCustomUrl, setShowCustomUrl] = useState(false);
+  const [customUrlInput, setCustomUrlInput] = useState(() =>
+    getSavedCustomLocalAiUrl()
+  );
+
+  // Built-in Plug & Play Vault AI Chat
+  const [chatHistory, setChatHistory] = useState<ChatTurnMessage[]>([]);
+  const [chatPrompt, setChatPrompt] = useState('');
+  const [chatLoading, setChatLoading] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
+
+  // Key management & developer tab state
   const [name, setName] = useState('');
   const [scope, setScope] = useState<'read' | 'read_write'>('read');
   const [folderRestriction, setFolderRestriction] = useState<string>('all');
   const [creating, setCreating] = useState(false);
-
   const [revealedIds, setRevealedIds] = useState<Record<string, boolean>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [snippetTab, setSnippetTab] = useState<'ollama' | 'curl'>('ollama');
-
-  const activeKeyObj =
-    vault.apiKeys.find((k) => k.active) || vault.apiKeys[0] || null;
-  const [testEndpoint, setTestEndpoint] = useState<string>('/api/v1/ai/files');
+  const [testEndpoint, setTestEndpoint] = useState<string>('/api/v1/ai/status');
   const [testOutput, setTestOutput] = useState<string>('');
   const [testing, setTesting] = useState(false);
 
@@ -55,8 +107,84 @@ export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
     typeof window !== 'undefined'
       ? window.location.origin
       : 'http://127.0.0.1:3000';
-  const activeKeyToken = activeKeyObj?.key || 'cldy_sk_YOUR_KEY';
-  const offlineZipHref = `/api/ai-keys/offline-bundle.zip?vaultId=${encodeURIComponent(getOrCreateVaultId())}`;
+  const vaultIdParam = encodeURIComponent(getOrCreateVaultId());
+  const keyIdParam = selectedKeyObj ? `&keyId=${encodeURIComponent(selectedKeyObj.id)}` : '';
+  const activeKeyToken = selectedKeyObj?.key || 'cldy_sk_YOUR_KEY';
+
+  const offlineZipHref = `/api/ai-keys/offline-bundle.zip?vaultId=${vaultIdParam}${keyIdParam}`;
+  const openWebUiHref = `/api/ai-keys/openwebui-tool.py?vaultId=${vaultIdParam}${keyIdParam}`;
+
+  const scanLocalAi = useCallback(
+    async (customOverride?: string) => {
+      setScanning(true);
+      try {
+        const res = await detectLocalAiRuntimes(
+          selectedKeyObj?.key,
+          customOverride ?? customUrlInput
+        );
+        setBridgeRunning(res.bridgeRunning);
+        setBridgeOnlineSync(res.bridgeOnlineSync);
+        setDetectedRuntimes(res.detectedRuntimes);
+        setLocalModels(res.models);
+        if (res.models.length > 0) {
+          setSelectedModelUid((prev) =>
+            res.models.some((m) => m.uid === prev) ? prev : res.models[0].uid
+          );
+        }
+      } finally {
+        setScanning(false);
+      }
+    },
+    [selectedKeyObj?.key, customUrlInput]
+  );
+
+  useEffect(() => {
+    scanLocalAi();
+  }, [scanLocalAi]);
+
+  const selectedModel =
+    localModels.find((m) => m.uid === selectedModelUid) || localModels[0] || null;
+
+  const copyText = (id: string, text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedId(id);
+    setTimeout(() => setCopiedId(null), 2000);
+  };
+
+  const handleSendChat = async (promptOverride?: string) => {
+    const text = (promptOverride ?? chatPrompt).trim();
+    if (!text || !selectedModel || chatLoading) return;
+
+    const nextHistory: ChatTurnMessage[] = [
+      ...chatHistory,
+      { role: 'user', content: text },
+    ];
+    setChatHistory(nextHistory);
+    if (!promptOverride) setChatPrompt('');
+    setChatError(null);
+    setChatLoading(true);
+
+    try {
+      const { reply, usedSkills } = await askLocalAiWithVaultSkills({
+        selectedModel,
+        messages: nextHistory,
+        vault,
+        activeKey: selectedKeyObj,
+        onSaveGeneratedNote,
+      });
+      setChatHistory([
+        ...nextHistory,
+        { role: 'assistant', content: reply, skills: usedSkills },
+      ]);
+      await onRefreshState();
+    } catch (err) {
+      setChatError(
+        err instanceof Error ? err.message : 'Failed to reach local AI model'
+      );
+    } finally {
+      setChatLoading(false);
+    }
+  };
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -74,21 +202,15 @@ export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
     }
   };
 
-  const copyText = (id: string, text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedId(id);
-    setTimeout(() => setCopiedId(null), 2000);
-  };
-
   const runLiveTest = async () => {
-    if (!activeKeyObj) return;
+    if (!selectedKeyObj) return;
     setTesting(true);
     try {
       if (isOffline) {
         try {
           const resp = await fetch(testEndpoint, {
             headers: {
-              Authorization: `Bearer ${activeKeyObj.key}`,
+              Authorization: `Bearer ${selectedKeyObj.key}`,
               'X-Cloudy-Offline-Test': '1',
             },
           });
@@ -115,7 +237,7 @@ export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
       }
 
       const res = await fetch(testEndpoint, {
-        headers: { Authorization: `Bearer ${activeKeyObj.key}` },
+        headers: { Authorization: `Bearer ${selectedKeyObj.key}` },
       });
       setTestOutput(JSON.stringify(await res.json(), null, 2));
       await onRefreshState();
@@ -126,10 +248,32 @@ export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
     }
   };
 
+  const mcpConfigSnippet = JSON.stringify(
+    {
+      mcpServers: {
+        'cloudy-vault': {
+          command: 'python3',
+          args: ['/path/to/Cloudy-PlugAndPlay-AI/cloudy_mcp_server.py'],
+          env: {
+            CLOUDY_API_KEY: activeKeyToken,
+            CLOUDY_REMOTE_URL: origin,
+          },
+        },
+      },
+    },
+    null,
+    2
+  );
+
+  const ollamaCorsCmd =
+    typeof navigator !== 'undefined' && /Win/i.test(navigator.userAgent)
+      ? 'set OLLAMA_ORIGINS=* && ollama serve'
+      : 'OLLAMA_ORIGINS="*" ollama serve';
+
   const ollamaSnippet = `import json, urllib.request
 
-# Auto-fallback: Online Cloud (${origin}) -> Local Auto-Sync Server (127.0.0.1:8765)
-URLS = ["${origin}", "http://127.0.0.1:8765"]
+# Auto-fallback: Local Auto-Sync Bridge (127.0.0.1:8765) -> Online Cloud (${origin})
+URLS = ["http://127.0.0.1:8765", "${origin}"]
 API_KEY = "${activeKeyToken}"
 
 def cloudy(path):
@@ -161,154 +305,654 @@ req = urllib.request.Request(
 )
 print(json.loads(urllib.request.urlopen(req).read().decode())["response"])`;
 
-  const curlSnippet = `# List accessible carpetas (Online or Local 127.0.0.1:8765)
+  const curlSnippet = `# OpenAI-Compatible Plug & Play Endpoint (Paste in Cursor / OpenWebUI / ChatBox)
+# Base URL: http://127.0.0.1:8765/v1
+# API Key:  ${activeKeyToken}
+
+# List accessible carpetas
 curl -s "${origin}/api/v1/ai/folders" -H "Authorization: Bearer ${activeKeyToken}"
 
-# Search vault files
-curl -s "${origin}/api/v1/ai/search?q=Cloudy" -H "Authorization: Bearer ${activeKeyToken}"
-
 # Read file content skill
-curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Bearer ${activeKeyToken}"
-
-# Force instant sync on Local Offline AI Server when internet returns
-curl -s -X POST "http://127.0.0.1:8765/api/v1/ai/sync" -H "Authorization: Bearer ${activeKeyToken}"`;
+curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Bearer ${activeKeyToken}"`;
 
   const codeToDisplay = snippetTab === 'ollama' ? ollamaSnippet : curlSnippet;
 
   return (
     <div className="flex-1 px-4 sm:px-8 py-7">
-      <div className="max-w-5xl mx-auto space-y-9">
-        {/* Header */}
+      <div className="max-w-5xl mx-auto space-y-7">
+        {/* Header + Segmented Mode Switcher */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
             <h1 className="text-xl font-semibold text-ink tracking-tight">
-              Local AI API Keys
+              Plug & Play Local AI
             </h1>
             <p className="text-xs text-ink-secondary mt-1">
-              Scoped REST keys for local models (Ollama, DeepSeek, Qwen, llama.cpp) — works 100% offline & auto-syncs live whenever internet is available.
+              Connect Ollama, LM Studio, DeepSeek, Qwen, or OpenWebUI in 1 click — zero manual coding, works offline & auto-syncs live.
             </p>
           </div>
 
-          <motion.a
-            whileHover={{ y: -1 }}
-            whileTap={{ scale: 0.98 }}
-            href={offlineZipHref}
-            className="px-4 py-2.5 rounded-full bg-surface hover:bg-elevated border border-line-strong text-ink text-xs font-medium inline-flex items-center gap-2 shadow-card transition w-fit"
-          >
-            <Download className="w-4 h-4 text-accent" />
-            Offline AI Server · Auto-Sync (.zip)
-          </motion.a>
+          <div className="inline-flex bg-surface border border-line-strong rounded-full p-1 text-xs shadow-card w-fit">
+            {[
+              { id: 'plug_play' as const, label: 'Plug & Play', icon: PlugZap },
+              { id: 'keys_code' as const, label: 'API Keys & Code', icon: KeyRound },
+            ].map((tab) => {
+              const Icon = tab.icon;
+              const active = viewMode === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  onClick={() => setViewMode(tab.id)}
+                  className={`relative px-4 py-1.5 rounded-full font-medium inline-flex items-center gap-1.5 transition-colors ${
+                    active ? 'text-accent-fg' : 'text-ink-secondary hover:text-ink'
+                  }`}
+                >
+                  {active && (
+                    <motion.span
+                      layoutId="aiViewModePill"
+                      transition={{ type: 'spring', stiffness: 450, damping: 32 }}
+                      className="absolute inset-0 rounded-full bg-accent shadow-glow"
+                    />
+                  )}
+                  <Icon className="relative z-10 w-3.5 h-3.5" />
+                  <span className="relative z-10">{tab.label}</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
 
-        {/* Create Key Composer Bar */}
-        <motion.form
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          onSubmit={handleCreate}
-          className="rounded-3xl bg-surface border border-line-strong p-3.5 shadow-card flex flex-col md:flex-row items-stretch md:items-center gap-2.5"
-        >
-          <input
-            type="text"
-            required
-            disabled={isOffline}
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Key label (e.g. Ollama / Qwen Local)"
-            className="flex-1 px-4 py-2.5 rounded-2xl bg-canvas border border-line focus:border-accent focus:ring-4 focus:ring-accent-soft focus:outline-none text-xs text-ink placeholder:text-ink-muted transition-all"
-          />
-
-          <select
-            value={scope}
-            onChange={(e) => setScope(e.target.value as 'read' | 'read_write')}
-            className="px-3.5 py-2.5 rounded-2xl bg-canvas border border-line text-xs text-ink focus:outline-none"
-          >
-            <option value="read">Read Only</option>
-            <option value="read_write">Read & Write</option>
-          </select>
-
-          <select
-            value={folderRestriction}
-            onChange={(e) => setFolderRestriction(e.target.value)}
-            className="px-3.5 py-2.5 rounded-2xl bg-canvas border border-line text-xs text-ink focus:outline-none"
-          >
-            <option value="all">All Carpetas</option>
-            {vault.folders
-              .filter((f) => !f.trashed)
-              .map((fld) => (
-                <option key={fld.id} value={fld.id}>
-                  Only: {fld.name}
-                </option>
-              ))}
-          </select>
-
-          <motion.button
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.97 }}
-            type="submit"
-            disabled={creating || isOffline}
-            className="px-5 py-2.5 rounded-full bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center justify-center gap-1.5 shadow-glow transition shrink-0 disabled:opacity-40"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            {creating ? 'Creating...' : 'Create Key'}
-          </motion.button>
-        </motion.form>
-
-        {/* Active Keys */}
-        <section className="space-y-3">
-          <h2 className="text-[11px] font-medium uppercase tracking-wider text-ink-muted px-0.5">
-            Active Keys
-          </h2>
-          <div className="rounded-2xl border border-line bg-surface shadow-card divide-y divide-line overflow-hidden">
-            {vault.apiKeys.map((k) => {
-              const revealed = Boolean(revealedIds[k.id]);
-              return (
-                <div
-                  key={k.id}
-                  className="p-4 sm:px-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-elevated/40 transition-colors"
-                >
-                  <div className="min-w-0 space-y-1">
-                    <div className="flex items-center gap-2.5">
-                      <span className="text-sm font-semibold text-ink">
-                        {k.name}
-                      </span>
-                      <span className="text-[10px] font-mono px-2.5 py-0.5 rounded-full bg-elevated text-ink-secondary">
-                        {k.scope}
-                      </span>
-                      {!k.active && (
-                        <span className="text-[10px] font-mono px-2.5 py-0.5 rounded-full bg-red-500/15 text-red-300">
-                          paused
-                        </span>
-                      )}
+        <AnimatePresence mode="wait">
+          {viewMode === 'plug_play' ? (
+            <motion.div
+              key="plug_play"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.18 }}
+              className="space-y-6"
+            >
+              {/* Hero Card: Instant Auto-Detect + Built-In Vault AI Chat */}
+              <div className="rounded-3xl bg-surface border border-line-strong p-5 sm:p-6 shadow-card space-y-5">
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-3.5">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-2xl bg-accent-soft text-accent flex items-center justify-center shrink-0">
+                      <Cpu className="w-5 h-5" />
                     </div>
-                    <div className="text-[11px] text-ink-muted">
-                      {k.usageCount} requests · Last used{' '}
-                      {formatRelativeTime(k.lastUsedAt)}
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm font-semibold text-ink">
+                          Instant Local AI Scanner
+                        </span>
+                        {localModels.length > 0 ? (
+                          <span className="px-2.5 py-0.5 rounded-full bg-[#10A37F]/15 text-[#10A37F] text-[11px] font-medium">
+                            {localModels.length} model{localModels.length === 1 ? '' : 's'} ready
+                            {detectedRuntimes.length > 0
+                              ? ` · ${detectedRuntimes.join(', ')}`
+                              : ''}
+                          </span>
+                        ) : bridgeRunning ? (
+                          <span className="px-2.5 py-0.5 rounded-full bg-accent-soft text-accent text-[11px] font-medium">
+                            Bridge Active · Start Ollama or LM Studio
+                          </span>
+                        ) : (
+                          <span className="px-2.5 py-0.5 rounded-full bg-elevated text-ink-muted text-[11px] font-medium">
+                            Waiting for Local AI
+                          </span>
+                        )}
+                        {bridgeRunning && (
+                          <span className="px-2 py-0.5 rounded-full bg-canvas border border-line text-[10px] text-ink-secondary">
+                            {bridgeOnlineSync ? 'Auto-Sync Live' : 'Offline Vault Active'}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-ink-muted mt-0.5">
+                        Auto-detects Ollama (:11434), LM Studio (:1234), llama.cpp (:8080), Jan (:1337) & Cloudy Bridge (:8765)
+                      </p>
                     </div>
                   </div>
 
                   <div className="flex items-center gap-2 flex-wrap">
-                    <code className="px-3.5 py-1.5 rounded-xl bg-canvas border border-line text-xs font-mono text-accent max-w-[230px] truncate">
-                      {revealed ? k.key : k.keyPrefix}
-                    </code>
-
                     <button
-                      onClick={() =>
-                        setRevealedIds((p) => ({ ...p, [k.id]: !revealed }))
-                      }
-                      className="p-2 rounded-xl text-ink-muted hover:text-ink hover:bg-elevated transition"
+                      type="button"
+                      onClick={() => setShowCustomUrl((v) => !v)}
+                      className="px-3 py-2 rounded-full bg-canvas hover:bg-elevated border border-line text-xs text-ink-secondary hover:text-ink inline-flex items-center gap-1.5 transition"
                     >
-                      {revealed ? (
-                        <EyeOff className="w-4 h-4" />
-                      ) : (
-                        <Eye className="w-4 h-4" />
-                      )}
+                      <SlidersHorizontal className="w-3.5 h-3.5" />
+                      Custom Port
                     </button>
 
-                    <button
-                      onClick={() => copyText(k.id, k.key)}
-                      className="px-3.5 py-1.5 rounded-full bg-accent-soft hover:bg-accent text-accent hover:text-accent-fg text-xs font-semibold inline-flex items-center gap-1 transition"
+                    <motion.button
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.97 }}
+                      type="button"
+                      disabled={scanning}
+                      onClick={() => scanLocalAi()}
+                      className="px-4 py-2 rounded-full bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center gap-1.5 shadow-glow transition"
                     >
-                      {copiedId === k.id ? (
+                      <RefreshCw
+                        className={`w-3.5 h-3.5 ${scanning ? 'animate-spin' : ''}`}
+                      />
+                      {scanning ? 'Scanning...' : 'Scan Local AI'}
+                    </motion.button>
+                  </div>
+                </div>
+
+                {showCustomUrl && (
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 p-3 rounded-2xl bg-canvas border border-line">
+                    <input
+                      type="text"
+                      value={customUrlInput}
+                      onChange={(e) => setCustomUrlInput(e.target.value)}
+                      placeholder="Custom local OpenAI/Ollama URL (e.g. http://127.0.0.1:5000)"
+                      className="flex-1 px-3.5 py-2 rounded-xl bg-surface border border-line text-xs text-ink placeholder:text-ink-muted focus:outline-none focus:border-accent"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        saveCustomLocalAiUrl(customUrlInput);
+                        scanLocalAi(customUrlInput);
+                      }}
+                      className="px-4 py-2 rounded-xl bg-elevated hover:bg-accent hover:text-accent-fg text-xs font-medium text-ink transition"
+                    >
+                      Save & Scan
+                    </button>
+                  </div>
+                )}
+
+                {localModels.length > 0 ? (
+                  <div className="space-y-4 pt-1">
+                    {/* Model + Scoped Key Selector Bar */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      <div className="flex items-center gap-2 px-3.5 py-2 rounded-2xl bg-canvas border border-line">
+                        <span className="text-[11px] text-ink-muted shrink-0">Model:</span>
+                        <select
+                          value={selectedModel?.uid || ''}
+                          onChange={(e) => setSelectedModelUid(e.target.value)}
+                          className="flex-1 bg-transparent text-xs font-medium text-ink focus:outline-none truncate"
+                        >
+                          {localModels.map((m) => (
+                            <option key={m.uid} value={m.uid} className="bg-surface">
+                              {m.name} ({m.providerName})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="flex items-center gap-2 px-3.5 py-2 rounded-2xl bg-canvas border border-line">
+                        <span className="text-[11px] text-ink-muted shrink-0">Access:</span>
+                        <select
+                          value={selectedKeyObj?.id || ''}
+                          onChange={(e) => setSelectedKeyId(e.target.value)}
+                          className="flex-1 bg-transparent text-xs font-medium text-ink focus:outline-none truncate"
+                        >
+                          {activeKeys.map((k) => (
+                            <option key={k.id} value={k.id} className="bg-surface">
+                              {k.name} · {k.scope === 'read_write' ? 'Read & Write' : 'Read Only'}
+                              {k.allowedFolderIds.length > 0 ? ' (Scoped)' : ' (All Carpetas)'}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+
+                    {/* Built-In Offline + Online Vault Chat */}
+                    <div className="rounded-2xl bg-canvas border border-line p-4 space-y-3">
+                      {chatHistory.length === 0 ? (
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-[11px] text-ink-muted mr-1">
+                            Try a Vault Skill:
+                          </span>
+                          {[
+                            'Read my files and summarize them',
+                            'What carpetas and notes are in my vault?',
+                            'Read Quickstart.md and list key points',
+                          ].map((q) => (
+                            <button
+                              key={q}
+                              type="button"
+                              onClick={() => handleSendChat(q)}
+                              className="px-3 py-1.5 rounded-full bg-surface hover:bg-elevated border border-line text-[11px] text-ink-secondary hover:text-ink transition"
+                            >
+                              {q}
+                            </button>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="max-h-72 overflow-y-auto space-y-3 pr-1">
+                          {chatHistory.map((turn, idx) => (
+                            <div
+                              key={idx}
+                              className={`flex flex-col ${
+                                turn.role === 'user' ? 'items-end' : 'items-start'
+                              }`}
+                            >
+                              {turn.skills && turn.skills.length > 0 && (
+                                <div className="flex flex-wrap gap-1.5 mb-1.5">
+                                  {turn.skills.map((s, sIdx) => (
+                                    <span
+                                      key={sIdx}
+                                      className="px-2 py-0.5 rounded-full bg-accent-soft text-accent text-[10px] font-mono"
+                                    >
+                                      ⚡ {s.skill}({s.detail})
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                              <div
+                                className={`max-w-[88%] px-3.5 py-2.5 rounded-2xl text-xs whitespace-pre-wrap leading-relaxed ${
+                                  turn.role === 'user'
+                                    ? 'bg-accent text-accent-fg'
+                                    : 'bg-surface border border-line text-ink'
+                                }`}
+                              >
+                                {turn.content}
+                              </div>
+                            </div>
+                          ))}
+                          {chatLoading && (
+                            <div className="text-xs text-ink-muted animate-pulse px-1">
+                              Reading vault files & thinking locally...
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {chatError && (
+                        <div className="text-xs text-red-400 px-1">{chatError}</div>
+                      )}
+
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          handleSendChat();
+                        }}
+                        className="flex items-center gap-2 pt-1"
+                      >
+                        <input
+                          type="text"
+                          value={chatPrompt}
+                          onChange={(e) => setChatPrompt(e.target.value)}
+                          placeholder={`Ask ${selectedModel?.name || 'Local AI'} about your Cloudy files (works offline)...`}
+                          className="flex-1 px-4 py-2.5 rounded-full bg-surface border border-line focus:border-accent focus:outline-none text-xs text-ink placeholder:text-ink-muted"
+                        />
+                        <button
+                          type="submit"
+                          disabled={chatLoading || !chatPrompt.trim()}
+                          className="p-2.5 rounded-full bg-accent hover:bg-accent-hover text-accent-fg disabled:opacity-50 transition shadow-glow"
+                        >
+                          <Send className="w-3.5 h-3.5" />
+                        </button>
+                      </form>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="rounded-2xl bg-canvas border border-line p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                    <div className="space-y-1">
+                      <div className="text-xs font-medium text-ink">
+                        Zero-Code Setup: Double-click the launcher to connect any local AI
+                      </div>
+                      <p className="text-[11px] text-ink-muted leading-relaxed">
+                        Download the pre-configured pack below and open{' '}
+                        <span className="text-ink font-mono">Start-Cloudy-AI</span> (or start Ollama with{' '}
+                        <button
+                          type="button"
+                          onClick={() => copyText('cors', ollamaCorsCmd)}
+                          className="text-accent hover:underline font-mono"
+                        >
+                          {copiedId === 'cors' ? 'Copied!' : ollamaCorsCmd}
+                        </button>
+                        ), then click <strong>Scan Local AI</strong>.
+                      </p>
+                    </div>
+
+                    <a
+                      href={offlineZipHref}
+                      className="px-4 py-2.5 rounded-full bg-surface hover:bg-elevated border border-line-strong text-ink text-xs font-semibold inline-flex items-center gap-2 shrink-0 shadow-card transition"
+                    >
+                      <Download className="w-4 h-4 text-accent" />
+                      Download Launcher (.zip)
+                    </a>
+                  </div>
+                )}
+              </div>
+
+              {/* 3 Plug & Play External App Cards (Zero Manual Code Needed) */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {/* Card 1: Double-Click Launcher + OpenAI /v1 Proxy */}
+                <div className="rounded-3xl bg-surface border border-line p-5 flex flex-col justify-between gap-4 shadow-card">
+                  <div className="space-y-2">
+                    <div className="w-9 h-9 rounded-xl bg-accent-soft text-accent flex items-center justify-center">
+                      <Terminal className="w-4 h-4" />
+                    </div>
+                    <h3 className="text-sm font-semibold text-ink">
+                      1. Double-Click AI Bridge
+                    </h3>
+                    <p className="text-xs text-ink-secondary leading-relaxed">
+                      Includes Windows <code className="text-ink">.bat</code>, Mac{' '}
+                      <code className="text-ink">.command</code> & Linux{' '}
+                      <code className="text-ink">.sh</code> launchers + Live Auto-Sync + an OpenAI-compatible{' '}
+                      <code className="text-ink">/v1</code> URL for Cursor, ChatBox & AnythingLLM.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <a
+                      href={offlineZipHref}
+                      className="w-full py-2.5 px-4 rounded-full bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center justify-center gap-1.5 shadow-glow transition"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      Plug & Play Pack (.zip)
+                    </a>
+                    <button
+                      type="button"
+                      onClick={() => copyText('v1url', 'http://127.0.0.1:8765/v1')}
+                      className="w-full py-2 px-3 rounded-full bg-canvas hover:bg-elevated border border-line text-[11px] text-ink-secondary hover:text-ink inline-flex items-center justify-center gap-1.5 transition"
+                    >
+                      {copiedId === 'v1url' ? (
+                        <>
+                          <Check className="w-3.5 h-3.5 text-[#10A37F]" /> Copied OpenAI /v1 URL
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3.5 h-3.5" /> Copy Local /v1 Base URL
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Card 2: 1-Click OpenWebUI Skill */}
+                <div className="rounded-3xl bg-surface border border-line p-5 flex flex-col justify-between gap-4 shadow-card">
+                  <div className="space-y-2">
+                    <div className="w-9 h-9 rounded-xl bg-[#10A37F]/15 text-[#10A37F] flex items-center justify-center">
+                      <Sparkles className="w-4 h-4" />
+                    </div>
+                    <h3 className="text-sm font-semibold text-ink">
+                      2. OpenWebUI 1-Click Skill
+                    </h3>
+                    <p className="text-xs text-ink-secondary leading-relaxed">
+                      Pre-filled with your API key & Online/Offline fallback URLs. Import once in{' '}
+                      <span className="text-ink">Workspace → Tools</span> to give any Ollama, Qwen, or DeepSeek model Read & Search skills.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <a
+                      href={openWebUiHref}
+                      className="w-full py-2.5 px-4 rounded-full bg-elevated hover:bg-accent hover:text-accent-fg border border-line-strong text-ink text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      Download OpenWebUI Skill (.py)
+                    </a>
+                    <button
+                      type="button"
+                      onClick={() => copyText('quickkey', activeKeyToken)}
+                      className="w-full py-2 px-3 rounded-full bg-canvas hover:bg-elevated border border-line text-[11px] text-ink-secondary hover:text-ink inline-flex items-center justify-center gap-1.5 transition"
+                    >
+                      {copiedId === 'quickkey' ? (
+                        <>
+                          <Check className="w-3.5 h-3.5 text-[#10A37F]" /> Copied API Key
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3.5 h-3.5" /> Copy Pre-Linked API Key
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Card 3: 1-Click MCP Config */}
+                <div className="rounded-3xl bg-surface border border-line p-5 flex flex-col justify-between gap-4 shadow-card">
+                  <div className="space-y-2">
+                    <div className="w-9 h-9 rounded-xl bg-[#D97757]/15 text-[#E58A6B] flex items-center justify-center">
+                      <Blocks className="w-4 h-4" />
+                    </div>
+                    <h3 className="text-sm font-semibold text-ink">
+                      3. MCP 1-Click Config
+                    </h3>
+                    <p className="text-xs text-ink-secondary leading-relaxed">
+                      Zero-dependency MCP server (<code className="text-ink">cloudy_mcp_server.py</code> inside the pack) for LM Studio, Claude Desktop, Cursor, Windsurf & Cline.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <button
+                      type="button"
+                      onClick={() => copyText('mcpjson', mcpConfigSnippet)}
+                      className="w-full py-2.5 px-4 rounded-full bg-elevated hover:bg-accent hover:text-accent-fg border border-line-strong text-ink text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition"
+                    >
+                      {copiedId === 'mcpjson' ? (
+                        <>
+                          <Check className="w-3.5 h-3.5" /> Copied MCP Config JSON
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3.5 h-3.5" /> Copy MCP Config JSON
+                        </>
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setViewMode('keys_code')}
+                      className="w-full py-2 px-3 rounded-full bg-canvas hover:bg-elevated border border-line text-[11px] text-ink-secondary hover:text-ink transition"
+                    >
+                      Manage Folder Scopes →
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          ) : (
+            <motion.div
+              key="keys_code"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.18 }}
+              className="space-y-8"
+            >
+              {/* Create Key Composer Bar */}
+              <form
+                onSubmit={handleCreate}
+                className="rounded-3xl bg-surface border border-line-strong p-3.5 shadow-card flex flex-col md:flex-row items-stretch md:items-center gap-2.5"
+              >
+                <input
+                  type="text"
+                  required
+                  disabled={isOffline}
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="Key label (e.g. Ollama / Qwen Local)"
+                  className="flex-1 px-4 py-2.5 rounded-2xl bg-canvas border border-line focus:border-accent focus:ring-4 focus:ring-accent-soft focus:outline-none text-xs text-ink placeholder:text-ink-muted transition-all"
+                />
+
+                <select
+                  value={scope}
+                  onChange={(e) => setScope(e.target.value as 'read' | 'read_write')}
+                  className="px-3.5 py-2.5 rounded-2xl bg-canvas border border-line text-xs text-ink focus:outline-none"
+                >
+                  <option value="read">Read Only</option>
+                  <option value="read_write">Read & Write</option>
+                </select>
+
+                <select
+                  value={folderRestriction}
+                  onChange={(e) => setFolderRestriction(e.target.value)}
+                  className="px-3.5 py-2.5 rounded-2xl bg-canvas border border-line text-xs text-ink focus:outline-none"
+                >
+                  <option value="all">All Carpetas</option>
+                  {vault.folders
+                    .filter((f) => !f.trashed)
+                    .map((f) => (
+                      <option key={f.id} value={f.id}>
+                        Only: {f.name}
+                      </option>
+                    ))}
+                </select>
+
+                <motion.button
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.97 }}
+                  type="submit"
+                  disabled={creating || isOffline}
+                  className="px-5 py-2.5 rounded-full bg-accent hover:bg-accent-hover text-accent-fg font-semibold text-xs inline-flex items-center justify-center gap-1.5 shadow-glow transition disabled:opacity-50"
+                >
+                  <Plus className="w-4 h-4" />
+                  Create Key
+                </motion.button>
+              </form>
+
+              {/* Active Keys List */}
+              <section className="space-y-3">
+                <div className="text-[11px] font-medium uppercase tracking-wider text-ink-muted px-0.5">
+                  Scoped Keys · {vault.apiKeys.length}
+                </div>
+
+                <div className="rounded-3xl bg-surface border border-line divide-y divide-line overflow-hidden shadow-card">
+                  {vault.apiKeys.map((k) => {
+                    const revealed = Boolean(revealedIds[k.id]);
+                    const folderLabels =
+                      k.allowedFolderIds.length === 0
+                        ? 'All Carpetas'
+                        : k.allowedFolderIds
+                            .map(
+                              (fid) =>
+                                vault.folders.find((fl) => fl.id === fid)?.name || fid
+                            )
+                            .join(', ');
+
+                    return (
+                      <div
+                        key={k.id}
+                        className="px-5 py-4 flex flex-col md:flex-row md:items-center justify-between gap-3 hover:bg-elevated/50 transition-colors"
+                      >
+                        <div className="space-y-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-[13.5px] font-medium text-ink">
+                              {k.name}
+                            </span>
+                            <span
+                              className={`text-[10.5px] px-2.5 py-0.5 rounded-full font-medium ${
+                                k.active
+                                  ? 'bg-[#10A37F]/15 text-[#10A37F]'
+                                  : 'bg-elevated text-ink-muted'
+                              }`}
+                            >
+                              {k.active ? 'Active' : 'Paused'}
+                            </span>
+                            <span className="text-[10.5px] px-2.5 py-0.5 rounded-full bg-elevated text-ink-secondary">
+                              {k.scope === 'read_write' ? 'Read & Write' : 'Read'} ·{' '}
+                              {folderLabels}
+                            </span>
+                          </div>
+
+                          <div className="flex items-center gap-3 text-xs font-mono text-ink-muted">
+                            <span className="truncate">
+                              {revealed ? k.key : k.keyPrefix}
+                            </span>
+                            <span className="text-[11px] font-sans">
+                              · {k.usageCount || 0} calls ·{' '}
+                              {formatRelativeTime(k.lastUsedAt)}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            onClick={() =>
+                              setRevealedIds((p) => ({ ...p, [k.id]: !p[k.id] }))
+                            }
+                            className="p-2 rounded-xl bg-elevated hover:bg-canvas text-ink-secondary hover:text-ink transition"
+                            title={revealed ? 'Hide' : 'Reveal'}
+                          >
+                            {revealed ? (
+                              <EyeOff className="w-3.5 h-3.5" />
+                            ) : (
+                              <Eye className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+
+                          <button
+                            onClick={() => copyText(k.id, k.key)}
+                            className="px-3.5 py-1.5 rounded-full bg-accent-soft hover:bg-accent text-accent hover:text-accent-fg text-xs font-semibold inline-flex items-center gap-1 transition"
+                          >
+                            {copiedId === k.id ? (
+                              <>
+                                <Check className="w-3.5 h-3.5" /> Copied
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="w-3.5 h-3.5" /> Copy
+                              </>
+                            )}
+                          </button>
+
+                          <button
+                            disabled={isOffline}
+                            onClick={() => onToggleKeyActive(k)}
+                            className="px-3 py-1.5 rounded-full bg-elevated hover:bg-canvas text-xs text-ink-secondary hover:text-ink transition"
+                          >
+                            {k.active ? 'Pause' : 'Enable'}
+                          </button>
+
+                          {vault.apiKeys.length > 1 && (
+                            <button
+                              disabled={isOffline}
+                              onClick={() => onDeleteKey(k.id)}
+                              className="p-2 rounded-xl text-ink-muted hover:text-red-400 hover:bg-elevated transition"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+
+              {/* Code Snippets + Live Endpoint Runner */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+                <div className="lg:col-span-7 rounded-3xl bg-surface border border-line p-5 space-y-4 shadow-card">
+                  <div className="flex items-center justify-between">
+                    <div className="inline-flex bg-canvas border border-line rounded-full p-1 text-xs">
+                      {(['ollama', 'curl'] as const).map((tab) => {
+                        const active = snippetTab === tab;
+                        return (
+                          <button
+                            key={tab}
+                            onClick={() => setSnippetTab(tab)}
+                            className={`relative px-3.5 py-1.5 rounded-full font-medium transition-colors ${
+                              active
+                                ? 'text-accent-fg'
+                                : 'text-ink-secondary hover:text-ink'
+                            }`}
+                          >
+                            {active && (
+                              <motion.span
+                                layoutId="aiSnippetTab"
+                                transition={{
+                                  type: 'spring',
+                                  stiffness: 450,
+                                  damping: 32,
+                                }}
+                                className="absolute inset-0 rounded-full bg-accent shadow-glow"
+                              />
+                            )}
+                            <span className="relative z-10">
+                              {tab === 'ollama' ? 'Python + Local LLM' : 'cURL & /v1'}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <button
+                      onClick={() => copyText('snippet', codeToDisplay)}
+                      className="text-xs text-accent hover:underline inline-flex items-center gap-1 font-medium"
+                    >
+                      {copiedId === 'snippet' ? (
                         <>
                           <Check className="w-3.5 h-3.5" /> Copied
                         </>
@@ -318,122 +962,56 @@ curl -s -X POST "http://127.0.0.1:8765/api/v1/ai/sync" -H "Authorization: Bearer
                         </>
                       )}
                     </button>
-
-                    <button
-                      disabled={isOffline}
-                      onClick={() => onToggleKeyActive(k)}
-                      className="px-3 py-1.5 rounded-full bg-elevated hover:bg-canvas text-xs text-ink-secondary hover:text-ink transition"
-                    >
-                      {k.active ? 'Pause' : 'Enable'}
-                    </button>
-
-                    {vault.apiKeys.length > 1 && (
-                      <button
-                        disabled={isOffline}
-                        onClick={() => onDeleteKey(k.id)}
-                        className="p-2 rounded-xl text-ink-muted hover:text-red-400 hover:bg-elevated transition"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    )}
                   </div>
+
+                  <pre className="p-4 rounded-2xl bg-canvas border border-line text-xs font-mono text-ink overflow-x-auto leading-relaxed">
+                    {codeToDisplay}
+                  </pre>
                 </div>
-              );
-            })}
-          </div>
-        </section>
 
-        {/* Code Snippets + Live Endpoint Runner */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-          <div className="lg:col-span-7 rounded-3xl bg-surface border border-line p-5 space-y-4 shadow-card">
-            <div className="flex items-center justify-between">
-              <div className="inline-flex bg-canvas border border-line rounded-full p-1 text-xs">
-                {(['ollama', 'curl'] as const).map((tab) => {
-                  const active = snippetTab === tab;
-                  return (
-                    <button
-                      key={tab}
-                      onClick={() => setSnippetTab(tab)}
-                      className={`relative px-3.5 py-1.5 rounded-full font-medium transition-colors ${
-                        active ? 'text-accent-fg' : 'text-ink-secondary hover:text-ink'
-                      }`}
+                <div className="lg:col-span-5 rounded-3xl bg-surface border border-line p-5 space-y-4 shadow-card">
+                  <div className="text-xs font-medium text-ink-secondary">
+                    Interactive Endpoint Tester
+                  </div>
+                  <div className="flex gap-2">
+                    <select
+                      value={testEndpoint}
+                      onChange={(e) => setTestEndpoint(e.target.value)}
+                      className="flex-1 px-3.5 py-2 rounded-2xl bg-canvas border border-line text-xs font-mono text-ink focus:outline-none"
                     >
-                      {active && (
-                        <motion.span
-                          layoutId="aiSnippetTab"
-                          transition={{ type: 'spring', stiffness: 450, damping: 32 }}
-                          className="absolute inset-0 rounded-full bg-accent shadow-glow"
-                        />
-                      )}
-                      <span className="relative z-10">
-                        {tab === 'ollama' ? 'Python + Local LLM' : 'cURL REST'}
-                      </span>
-                    </button>
-                  );
-                })}
+                      <option value="/api/v1/ai/status">GET /api/v1/ai/status</option>
+                      <option value="/api/v1/ai/sync-manifest">
+                        GET /api/v1/ai/sync-manifest
+                      </option>
+                      <option value="/api/v1/ai/folders">GET /api/v1/ai/folders</option>
+                      <option value="/api/v1/ai/files">GET /api/v1/ai/files</option>
+                      <option value="/api/v1/ai/search?q=Cloudy">
+                        GET /api/v1/ai/search?q=Cloudy
+                      </option>
+                      <option value="/api/v1/ai/files/fil_welcome/content">
+                        GET /api/v1/ai/files/fil_welcome/content
+                      </option>
+                    </select>
+                    <motion.button
+                      whileHover={{ scale: 1.03 }}
+                      whileTap={{ scale: 0.96 }}
+                      onClick={runLiveTest}
+                      disabled={testing || !selectedKeyObj}
+                      className="px-4 py-2 rounded-full bg-accent hover:bg-accent-hover text-accent-fg font-semibold text-xs inline-flex items-center gap-1.5 shadow-glow transition"
+                    >
+                      <Play className="w-3.5 h-3.5" />
+                      Run
+                    </motion.button>
+                  </div>
+
+                  <pre className="p-4 rounded-2xl bg-canvas border border-line text-[11px] font-mono text-ink-secondary h-52 overflow-auto">
+                    {testOutput || '// Click Run to inspect live JSON response'}
+                  </pre>
+                </div>
               </div>
-
-              <button
-                onClick={() => copyText('snippet', codeToDisplay)}
-                className="text-xs text-accent hover:underline inline-flex items-center gap-1 font-medium"
-              >
-                {copiedId === 'snippet' ? (
-                  <>
-                    <Check className="w-3.5 h-3.5" /> Copied
-                  </>
-                ) : (
-                  <>
-                    <Copy className="w-3.5 h-3.5" /> Copy
-                  </>
-                )}
-              </button>
-            </div>
-
-            <pre className="p-4 rounded-2xl bg-canvas border border-line text-xs font-mono text-ink overflow-x-auto leading-relaxed">
-              {codeToDisplay}
-            </pre>
-          </div>
-
-          <div className="lg:col-span-5 rounded-3xl bg-surface border border-line p-5 space-y-4 shadow-card">
-            <div className="text-xs font-medium text-ink-secondary">
-              Interactive Endpoint Tester
-            </div>
-            <div className="flex gap-2">
-              <select
-                value={testEndpoint}
-                onChange={(e) => setTestEndpoint(e.target.value)}
-                className="flex-1 px-3.5 py-2 rounded-2xl bg-canvas border border-line text-xs font-mono text-ink focus:outline-none"
-              >
-                <option value="/api/v1/ai/status">GET /api/v1/ai/status</option>
-                <option value="/api/v1/ai/sync-manifest">
-                  GET /api/v1/ai/sync-manifest
-                </option>
-                <option value="/api/v1/ai/folders">GET /api/v1/ai/folders</option>
-                <option value="/api/v1/ai/files">GET /api/v1/ai/files</option>
-                <option value="/api/v1/ai/search?q=Cloudy">
-                  GET /api/v1/ai/search?q=Cloudy
-                </option>
-                <option value="/api/v1/ai/files/fil_welcome/content">
-                  GET /api/v1/ai/files/fil_welcome/content
-                </option>
-              </select>
-              <motion.button
-                whileHover={{ scale: 1.03 }}
-                whileTap={{ scale: 0.96 }}
-                onClick={runLiveTest}
-                disabled={testing || !activeKeyObj}
-                className="px-4 py-2 rounded-full bg-accent hover:bg-accent-hover text-accent-fg font-semibold text-xs inline-flex items-center gap-1.5 shadow-glow transition"
-              >
-                <Play className="w-3.5 h-3.5" />
-                Run
-              </motion.button>
-            </div>
-
-            <pre className="p-4 rounded-2xl bg-canvas border border-line text-[11px] font-mono text-ink-secondary h-52 overflow-auto">
-              {testOutput || '// Click Run to inspect live JSON response'}
-            </pre>
-          </div>
-        </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
     </div>
   );

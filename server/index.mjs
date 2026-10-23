@@ -40,6 +40,7 @@ import {
   createAiRouter,
   isLikelyTextMime,
   streamOfflineAiBundleZip,
+  downloadOpenWebUiToolHandler,
 } from './aiApi.mjs';
 import {
   getAndroidInfo,
@@ -1004,6 +1005,7 @@ app.delete('/api/ai-keys/:id', (req, res) => {
 });
 
 app.get('/api/ai-keys/offline-bundle.zip', streamOfflineAiBundleZip);
+app.get('/api/ai-keys/openwebui-tool.py', downloadOpenWebUiToolHandler);
 
 // --- Android PWA + APK Download Endpoints ---
 app.get('/api/android/info', getAndroidInfo);
