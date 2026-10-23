@@ -1,4 +1,4 @@
-import type { VaultState, FileItem } from '../types';
+import type { VaultState, FileItem, StorageAccount } from '../types';
 import { apiFetch } from './vaultClient';
 import {
   persistSnapshotToOfflineVault,
@@ -10,6 +10,42 @@ import {
   removeOfflineQueueItem,
 } from './offlineDb';
 
+const FORBIDDEN_MODES = new Set([
+  'one_time_oauth',
+  'simulated',
+  'mock',
+  'demo',
+  'builtin',
+  'builtin_cloud',
+]);
+
+function filterRealAccounts(accounts: StorageAccount[]): StorageAccount[] {
+  return (accounts || []).filter(
+    (a) =>
+      a &&
+      a.providerId !== 'xkilo_core' &&
+      a.providerId !== 'offline_vault' &&
+      !FORBIDDEN_MODES.has(String(a.connectionMode || '').toLowerCase()) &&
+      Boolean(a.verified || a.sealedCredentials)
+  );
+}
+
+function sanitizeOfflineSnapshot(snap: VaultState): VaultState {
+  const realAccounts = filterRealAccounts(snap.accounts);
+  const totalQuotaBytes = realAccounts.reduce((s, a) => s + (a.quotaBytes || 0), 0);
+  const totalUsedBytes = realAccounts.reduce((s, a) => s + (a.usedBytes || 0), 0);
+  return {
+    ...snap,
+    accounts: realAccounts,
+    summary: {
+      ...snap.summary,
+      totalQuotaBytes,
+      totalUsedBytes,
+      connectedProvidersCount: realAccounts.length,
+    },
+  };
+}
+
 export async function syncVaultState(forceOfflineMode: boolean): Promise<{
   state: VaultState;
   isOffline: boolean;
@@ -20,7 +56,7 @@ export async function syncVaultState(forceOfflineMode: boolean): Promise<{
     const queue = await getOfflineQueue();
     if (offlineState) {
       return {
-        state: offlineState,
+        state: sanitizeOfflineSnapshot(offlineState),
         isOffline: true,
         pendingQueueCount: queue.length,
       };
@@ -31,21 +67,22 @@ export async function syncVaultState(forceOfflineMode: boolean): Promise<{
     const queue = await getOfflineQueue();
     for (const action of queue) {
       try {
+        let resp: Response | null = null;
         if (action.type === 'create_folder') {
-          await apiFetch('/api/folders', {
+          resp = await apiFetch('/api/folders', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(action.payload),
           });
         } else if (action.type === 'create_note') {
-          await apiFetch('/api/files/note', {
+          resp = await apiFetch('/api/files/note', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(action.payload),
           });
         } else if (action.type === 'update_file') {
           const { fileId, ...rest } = action.payload;
-          await apiFetch(`/api/files/${fileId}`, {
+          resp = await apiFetch(`/api/files/${fileId}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(rest),
@@ -63,44 +100,26 @@ export async function syncVaultState(forceOfflineMode: boolean): Promise<{
           if (action.payload.id) {
             fd.append('clientFileId', String(action.payload.id));
           }
-          await apiFetch('/api/files/upload', { method: 'POST', body: fd });
+          resp = await apiFetch('/api/files/upload', { method: 'POST', body: fd });
         }
-        await removeOfflineQueueItem(action.id);
+
+        if (!resp || resp.ok) {
+          await removeOfflineQueueItem(action.id);
+        } else {
+          // If no cloud account connected yet for binary upload, keep queued until user connects one
+          const body = await resp.json().catch(() => ({}));
+          if (body?.code !== 'NO_CLOUD_ACCOUNT') {
+            await removeOfflineQueueItem(action.id);
+          }
+        }
       } catch {
-        // Retry next sync
+        // Network error — retry next sync
       }
     }
 
-    const localSnap = await loadOfflineSnapshot();
     const res = await apiFetch('/api/vault/state');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    let data = (await res.json()) as VaultState;
-
-    if (localSnap) {
-      const serverAccIds = new Set(data.accounts.map((a) => a.id));
-      const serverFileIds = new Set(data.files.map((f) => f.id));
-      const missingAccs = localSnap.accounts.filter(
-        (a) => a.providerId !== 'xkilo_core' && !serverAccIds.has(a.id)
-      );
-      const missingFiles = localSnap.files.filter((f) => !serverFileIds.has(f.id));
-      if (missingAccs.length > 0 || missingFiles.length > 0) {
-        await apiFetch('/api/vault/hydrate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            settings: localSnap.settings,
-            accounts: localSnap.accounts,
-            folders: localSnap.folders,
-            files: localSnap.files,
-            apiKeys: localSnap.apiKeys,
-          }),
-        });
-        const reRes = await apiFetch('/api/vault/state');
-        if (reRes.ok) {
-          data = (await reRes.json()) as VaultState;
-        }
-      }
-    }
+    const data = sanitizeOfflineSnapshot((await res.json()) as VaultState);
 
     await persistSnapshotToOfflineVault(data);
     await cacheOfflinePinnedBlobs(data.files);
@@ -122,7 +141,7 @@ export async function syncVaultState(forceOfflineMode: boolean): Promise<{
     const queue = await getOfflineQueue();
     if (fallback) {
       return {
-        state: fallback,
+        state: sanitizeOfflineSnapshot(fallback),
         isOffline: true,
         pendingQueueCount: queue.length,
       };

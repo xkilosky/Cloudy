@@ -7,6 +7,11 @@ const VAULT_SECRET = crypto
   .update(process.env.CLOUDY_VAULT_SECRET || 'xkilo-cloudy-aes256-vault-key-v2')
   .digest();
 
+const LEGACY_VAULT_SECRET = crypto
+  .createHash('sha256')
+  .update('xkilo-cloudy-aes256-vault-key-v2')
+  .digest();
+
 export function sealCredentials(credsObj) {
   if (!credsObj) return null;
   const iv = crypto.randomBytes(12);
@@ -19,23 +24,27 @@ export function sealCredentials(credsObj) {
 
 export function unsealCredentials(sealed) {
   if (!sealed || typeof sealed !== 'string') return null;
-  try {
-    const [ivB64, tagB64, dataB64] = sealed.split('.');
-    if (!ivB64 || !tagB64 || !dataB64) return null;
-    const decipher = crypto.createDecipheriv(
-      'aes-256-gcm',
-      VAULT_SECRET,
-      Buffer.from(ivB64, 'base64url')
-    );
-    decipher.setAuthTag(Buffer.from(tagB64, 'base64url'));
-    const dec = Buffer.concat([
-      decipher.update(Buffer.from(dataB64, 'base64url')),
-      decipher.final(),
-    ]);
-    return JSON.parse(dec.toString('utf8'));
-  } catch {
-    return null;
+  const [ivB64, tagB64, dataB64] = sealed.split('.');
+  if (!ivB64 || !tagB64 || !dataB64) return null;
+
+  for (const key of [VAULT_SECRET, LEGACY_VAULT_SECRET]) {
+    try {
+      const decipher = crypto.createDecipheriv(
+        'aes-256-gcm',
+        key,
+        Buffer.from(ivB64, 'base64url')
+      );
+      decipher.setAuthTag(Buffer.from(tagB64, 'base64url'));
+      const dec = Buffer.concat([
+        decipher.update(Buffer.from(dataB64, 'base64url')),
+        decipher.final(),
+      ]);
+      return JSON.parse(dec.toString('utf8'));
+    } catch {
+      // try next key
+    }
   }
+  return null;
 }
 
 // --- Pure Node Crypto AWS Signature V4 Helper (for Cloudflare R2, Backblaze B2, Storj) ---
@@ -163,12 +172,29 @@ async function mintGoogleServiceAccountToken(sa) {
 // Smart parser for raw token, OAuth Playground JSON, rclone JSON, or Google Service Account JSON
 async function normalizeSmartTokenInput(rawCreds = {}) {
   const out = { ...rawCreds };
-  const candidate = (rawCreds.smartPayload || rawCreds.accessToken || '').trim();
-  if (candidate.startsWith('{') || candidate.includes('"access_token"') || candidate.includes('"private_key"')) {
+  let candidate = String(rawCreds.smartPayload || rawCreds.accessToken || '').trim();
+  if (candidate.toLowerCase().startsWith('bearer ')) {
+    candidate = candidate.slice(7).trim();
+  }
+  if (!candidate) {
+    throw new Error('An authorization token is required to verify your account.');
+  }
+
+  if (
+    candidate.startsWith('{') ||
+    candidate.includes('"access_token"') ||
+    candidate.includes('"private_key"')
+  ) {
     const startIdx = candidate.indexOf('{');
     const endIdx = candidate.lastIndexOf('}');
-    const jsonSlice = startIdx >= 0 && endIdx > startIdx ? candidate.slice(startIdx, endIdx + 1) : candidate;
-    const parsed = JSON.parse(jsonSlice);
+    const jsonSlice =
+      startIdx >= 0 && endIdx > startIdx ? candidate.slice(startIdx, endIdx + 1) : candidate;
+    let parsed;
+    try {
+      parsed = JSON.parse(jsonSlice);
+    } catch {
+      throw new Error('Invalid JSON token format. Paste a valid OAuth token or Service Account JSON.');
+    }
 
     if (parsed.type === 'service_account' && parsed.client_email && parsed.private_key) {
       const minted = await mintGoogleServiceAccountToken(parsed);
@@ -191,8 +217,42 @@ async function normalizeSmartTokenInput(rawCreds = {}) {
       const ts = Date.parse(parsed.expiry);
       if (!Number.isNaN(ts)) out.expiresAt = ts;
     }
+  } else {
+    out.accessToken = candidate;
   }
+
+  if (!out.accessToken) {
+    throw new Error('No valid access_token found in provided credentials.');
+  }
+  delete out.smartPayload;
   return out;
+}
+
+export function hasRealUpstreamCredentials(providerId, creds) {
+  if (!creds || typeof creds !== 'object') return false;
+  if (creds.serviceAccount?.client_email && creds.serviceAccount?.private_key) return true;
+  if (['google_drive', 'dropbox', 'onedrive', 'box', 'github_vault'].includes(providerId)) {
+    return typeof creds.accessToken === 'string' && creds.accessToken.length >= 10;
+  }
+  if (providerId === 'pcloud') {
+    return Boolean(
+      (typeof creds.authToken === 'string' && creds.authToken.length >= 6) ||
+        (typeof creds.accessToken === 'string' && creds.accessToken.length >= 6)
+    );
+  }
+  if (providerId === 'mega') {
+    return Boolean(creds.sessionDump && typeof creds.sessionDump === 'object');
+  }
+  if (['cloudflare_r2', 'backblaze_b2', 'storj'].includes(providerId)) {
+    return Boolean(creds.endpoint && creds.accessKeyId && creds.secretAccessKey && creds.bucket);
+  }
+  if (['koofr', 'yandex_disk', 'nextcloud'].includes(providerId)) {
+    return Boolean(creds.webdavUrl && creds.username && creds.password);
+  }
+  if (providerId === 'supabase_storage') {
+    return Boolean(creds.projectUrl && creds.apiKey && creds.bucket);
+  }
+  return false;
 }
 
 // --- Silent OAuth 2.0 / Service Account Token Refresh ---
@@ -279,12 +339,26 @@ export async function verifyAndInspectProvider(providerId, inputCreds) {
       throw new Error(`Google Drive verification failed (${res.status}): ${err}`);
     }
     const data = await res.json();
+    let email = rawCreds.serviceAccount?.client_email || data.user?.emailAddress || '';
+    let displayName = data.user?.displayName || '';
+    if (!email) {
+      const uRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+        headers: { Authorization: `Bearer ${rawCreds.accessToken}` },
+      }).catch(() => null);
+      if (uRes?.ok) {
+        const uInfo = await uRes.json();
+        email = uInfo.email || '';
+        displayName = displayName || uInfo.name || '';
+      }
+    }
+    if (!email) {
+      throw new Error('Could not verify Google account identity. Ensure email/Drive scope is granted.');
+    }
     const limit = Number(data.storageQuota?.limit || 15 * 1024 ** 3);
     const usage = Number(data.storageQuota?.usage || 0);
-    const email = rawCreds.serviceAccount?.client_email || data.user?.emailAddress || 'google-drive-user';
     return {
       email,
-      accountLabel: data.user?.displayName ? `Google Drive (${data.user.displayName})` : `Google Drive (${email})`,
+      accountLabel: displayName ? `Google Drive (${displayName})` : `Google Drive (${email})`,
       quotaBytes: limit,
       usedBytes: usage,
       credentials: rawCreds,
@@ -308,12 +382,17 @@ export async function verifyAndInspectProvider(providerId, inputCreds) {
       throw new Error(`Dropbox verification failed (${accRes.status}): ${err}`);
     }
     const acc = await accRes.json();
+    if (!acc.email) {
+      throw new Error('Could not verify real Dropbox account email.');
+    }
     const space = spaceRes.ok ? await spaceRes.json() : {};
     const allocated = Number(space.allocation?.allocated || 2 * 1024 ** 3);
     const used = Number(space.used || 0);
     return {
-      email: acc.email || 'dropbox-user',
-      accountLabel: acc.name?.display_name ? `Dropbox (${acc.name.display_name})` : 'Dropbox',
+      email: acc.email,
+      accountLabel: acc.name?.display_name
+        ? `Dropbox (${acc.name.display_name})`
+        : `Dropbox (${acc.email})`,
       quotaBytes: allocated,
       usedBytes: used,
       credentials: rawCreds,
@@ -322,19 +401,32 @@ export async function verifyAndInspectProvider(providerId, inputCreds) {
 
   // 3. Microsoft OneDrive (OAuth2 Graph API)
   if (providerId === 'onedrive') {
-    const res = await fetch('https://graph.microsoft.com/v1.0/me/drive', {
-      headers: { Authorization: `Bearer ${rawCreds.accessToken}` },
-    });
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`OneDrive verification failed (${res.status}): ${err}`);
+    const [meRes, driveRes] = await Promise.all([
+      fetch('https://graph.microsoft.com/v1.0/me', {
+        headers: { Authorization: `Bearer ${rawCreds.accessToken}` },
+      }).catch(() => null),
+      fetch('https://graph.microsoft.com/v1.0/me/drive', {
+        headers: { Authorization: `Bearer ${rawCreds.accessToken}` },
+      }),
+    ]);
+    if (!driveRes.ok) {
+      const err = await driveRes.text();
+      throw new Error(`OneDrive verification failed (${driveRes.status}): ${err}`);
     }
-    const drive = await res.json();
+    const drive = await driveRes.json();
+    const me = meRes?.ok ? await meRes.json() : {};
+    const realIdentity =
+      me.mail ||
+      me.userPrincipalName ||
+      drive.owner?.user?.email ||
+      drive.owner?.user?.displayName;
+    if (!realIdentity) {
+      throw new Error('Could not verify real Microsoft OneDrive account identity.');
+    }
+    const displayName = me.displayName || drive.owner?.user?.displayName || realIdentity;
     return {
-      email: drive.owner?.user?.email || drive.owner?.user?.displayName || 'onedrive-user',
-      accountLabel: drive.owner?.user?.displayName
-        ? `OneDrive (${drive.owner.user.displayName})`
-        : 'Microsoft OneDrive',
+      email: realIdentity,
+      accountLabel: `OneDrive (${displayName})`,
       quotaBytes: Number(drive.quota?.total || 5 * 1024 ** 3),
       usedBytes: Number(drive.quota?.used || 0),
       credentials: rawCreds,
@@ -351,9 +443,12 @@ export async function verifyAndInspectProvider(providerId, inputCreds) {
       throw new Error(`Box verification failed (${res.status}): ${err}`);
     }
     const me = await res.json();
+    if (!me.login) {
+      throw new Error('Could not verify real Box account login.');
+    }
     return {
-      email: me.login || 'box-user',
-      accountLabel: me.name ? `Box (${me.name})` : 'Box',
+      email: me.login,
+      accountLabel: me.name ? `Box (${me.name})` : `Box (${me.login})`,
       quotaBytes: Number(me.space_amount || 10 * 1024 ** 3),
       usedBytes: Number(me.space_used || 0),
       credentials: rawCreds,
@@ -379,10 +474,10 @@ export async function verifyAndInspectProvider(providerId, inputCreds) {
         });
         if (res.ok) {
           const info = await res.json();
-          if (info.result === 0 && info.auth) {
+          if (info.result === 0 && info.auth && info.email) {
             return {
-              email: info.email || rawCreds.email.trim(),
-              accountLabel: `pCloud (${info.email || rawCreds.email.trim()})`,
+              email: info.email,
+              accountLabel: `pCloud (${info.email})`,
               quotaBytes: Number(info.quota || 10 * 1024 ** 3),
               usedBytes: Number(info.usedquota || 0),
               credentials: { authToken: info.auth, apiHost: host },
@@ -390,11 +485,14 @@ export async function verifyAndInspectProvider(providerId, inputCreds) {
           }
         }
       }
-      throw new Error('pCloud login failed. Check your email, password, or 2FA code.');
+      throw new Error('pCloud login failed. Check your real pCloud email, password, or 2FA code.');
     }
 
     // Mode B: OAuth token / auth token
     const tok = rawCreds.authToken || rawCreds.accessToken;
+    if (!tok) {
+      throw new Error('pCloud credentials missing.');
+    }
     for (const host of ['https://api.pcloud.com', 'https://eapi.pcloud.com']) {
       const url = rawCreds.authToken
         ? `${host}/userinfo?auth=${encodeURIComponent(rawCreds.authToken)}`
@@ -404,10 +502,10 @@ export async function verifyAndInspectProvider(providerId, inputCreds) {
       });
       if (res.ok) {
         const info = await res.json();
-        if (info.result === 0) {
+        if (info.result === 0 && info.email) {
           return {
-            email: info.email || 'pcloud-user',
-            accountLabel: `pCloud (${info.email || 'Connected'})`,
+            email: info.email,
+            accountLabel: `pCloud (${info.email})`,
             quotaBytes: Number(info.quota || 10 * 1024 ** 3),
             usedBytes: Number(info.usedquota || 0),
             credentials: { ...rawCreds, apiHost: host },
@@ -431,6 +529,32 @@ export async function verifyAndInspectProvider(providerId, inputCreds) {
       throw new Error(`GitHub authentication failed (${userRes.status}): ${err}`);
     }
     const user = await userRes.json();
+    if (!user.login) {
+      throw new Error('Could not verify real GitHub account.');
+    }
+
+    // Fetch real verified email if available; otherwise use authentic @username handle (NEVER fake @github.com!)
+    let realIdentity = user.email || '';
+    if (!realIdentity) {
+      const emRes = await fetch('https://api.github.com/user/emails', {
+        headers: ghHeaders,
+      }).catch(() => null);
+      if (emRes?.ok) {
+        const emails = await emRes.json();
+        if (Array.isArray(emails)) {
+          const primary =
+            emails.find((e) => e.primary && e.verified) ||
+            emails.find((e) => e.verified);
+          if (primary?.email && !primary.email.endsWith('@users.noreply.github.com')) {
+            realIdentity = primary.email;
+          }
+        }
+      }
+    }
+    if (!realIdentity) {
+      realIdentity = `@${user.login} · github.com/${user.login}`;
+    }
+
     const repoName = (rawCreds.repoName || 'cloudy-vault').trim().replace(/[^a-zA-Z0-9._-]/g, '-');
 
     // Ensure repository exists (or create private vault repo)
@@ -457,7 +581,7 @@ export async function verifyAndInspectProvider(providerId, inputCreds) {
     }
     const repoInfo = await repoRes.json();
     return {
-      email: `${user.login}@github.com`,
+      email: realIdentity,
       accountLabel: `GitHub (${user.login}/${repoName})`,
       quotaBytes: 5 * 1024 ** 3,
       usedBytes: Number(repoInfo.size || 0) * 1024,
@@ -485,10 +609,24 @@ export async function verifyAndInspectProvider(providerId, inputCreds) {
           autologin: true,
         });
 
-    await storage.ready;
+    if (typeof storage.on === 'function') {
+      storage.on('error', () => {});
+    }
+
+    await Promise.race([
+      storage.ready,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('MEGA login timed out. Check your credentials.')), 20_000)
+      ),
+    ]);
+
     const info = await storage.getAccountInfo();
     const sessionDump = storage.dump();
     if (typeof storage.close === 'function') storage.close();
+
+    if (!sessionDump) {
+      throw new Error('MEGA session verification failed.');
+    }
 
     return {
       email: rawCreds.email.trim(),
@@ -529,8 +667,9 @@ export async function verifyAndInspectProvider(providerId, inputCreds) {
     }
     const defaultFree =
       providerId === 'storj' ? 25 * 1024 ** 3 : 10 * 1024 ** 3;
+    const endpointHost = new URL(endpoint.trim()).host;
     return {
-      email: `${bucket.trim()}@${providerId}`,
+      email: `s3://${bucket.trim()} · ${endpointHost}`,
       accountLabel: `${bucket.trim()} (${providerId.replace('_', ' ').toUpperCase()})`,
       quotaBytes: defaultFree,
       usedBytes: used,
@@ -616,10 +755,10 @@ export async function verifyAndInspectProvider(providerId, inputCreds) {
         body: JSON.stringify({ id: bucket, name: bucket, public: false }),
       });
     }
-    const hostLabel = new URL(projectUrl).hostname.split('.')[0];
+    const projectHost = new URL(projectUrl).host;
     return {
-      email: `${hostLabel}@supabase.co`,
-      accountLabel: `Supabase (${hostLabel}/${bucket})`,
+      email: `${projectHost}/${bucket}`,
+      accountLabel: `Supabase (${projectHost.split('.')[0]}/${bucket})`,
       quotaBytes: 1 * 1024 ** 3,
       usedBytes: 0,
       credentials: { projectUrl, apiKey, bucket },
@@ -1124,6 +1263,57 @@ export async function listRemoteProviderFiles(account, getOAuthConfig, onTokensU
       }));
   }
 
+  if (providerId === 'box') {
+    const token = await getValidOAuthToken(account, getOAuthConfig, onTokensUpdated);
+    const res = await fetch(
+      'https://api.box.com/2.0/folders/0/items?limit=60&fields=id,name,type,size,modified_at',
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!res.ok) return [];
+    const data = await res.json();
+    return (data.entries || [])
+      .filter((e) => e.type === 'file')
+      .map((e) => ({
+        remoteId: String(e.id),
+        remotePath: e.name,
+        name: e.name,
+        mimeType: 'application/octet-stream',
+        size: Number(e.size || 0),
+        updatedAt: e.modified_at || new Date().toISOString(),
+      }));
+  }
+
+  if (['koofr', 'yandex_disk', 'nextcloud'].includes(providerId)) {
+    const basic = Buffer.from(`${creds.username}:${creds.password}`).toString('base64');
+    const res = await fetch(`${creds.webdavUrl}/`, {
+      method: 'PROPFIND',
+      headers: { Authorization: `Basic ${basic}`, Depth: '1' },
+    });
+    if (!res.ok && res.status !== 207) return [];
+    const xml = await res.text();
+    const items = [];
+    for (const respBlock of xml.matchAll(/<[^:>]*:?response[^>]*>([\s\S]*?)<\/[^:>]*:?response>/gi)) {
+      const block = respBlock[1];
+      if (/collection/i.test(block)) continue;
+      const href = block.match(/<[^:>]*:?href[^>]*>([\s\S]*?)<\/[^:>]*:?href>/i)?.[1];
+      if (!href) continue;
+      const decodedName = decodeURIComponent(href.replace(/\/+$/, '').split('/').pop() || '');
+      if (!decodedName) continue;
+      const size = Number(
+        block.match(/getcontentlength[^>]*>(\d+)</i)?.[1] || 0
+      );
+      items.push({
+        remoteId: decodedName,
+        remotePath: decodedName,
+        name: decodedName,
+        mimeType: 'application/octet-stream',
+        size,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    return items.slice(0, 60);
+  }
+
   return [];
 }
 
@@ -1302,7 +1492,7 @@ const PUBLIC_DEVICE_CLIENTS = {
     clientId: process.env.GITHUB_DEVICE_CLIENT_ID || '178c6fc778ccc68e1d6a',
     deviceCodeUrl: 'https://github.com/login/device/code',
     tokenUrl: 'https://github.com/login/oauth/access_token',
-    scope: 'repo read:user',
+    scope: 'repo read:user user:email',
   },
   onedrive: {
     clientId: process.env.ONEDRIVE_DEVICE_CLIENT_ID || '14d82eec-204b-4c2f-b7e8-296a70dab67e',

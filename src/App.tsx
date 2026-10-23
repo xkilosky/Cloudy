@@ -192,7 +192,7 @@ export function App() {
 
     if (isOffline && vault) {
       const now = new Date().toISOString();
-      const coreAcc = vault.accounts[0];
+      const targetAcc = vault.accounts[0] || null;
       for (const rawFile of arr) {
         const fid = `fil_${Math.random().toString(36).slice(2, 11)}`;
         const isTxt =
@@ -206,9 +206,9 @@ export function App() {
           mimeType: rawFile.type || 'application/octet-stream',
           kind: 'file',
           size: rawFile.size,
-          accountId: coreAcc.id,
-          providerId: coreAcc.providerId,
-          providerName: coreAcc.providerName,
+          accountId: targetAcc ? targetAcc.id : 'offline_vault',
+          providerId: targetAcc ? targetAcc.providerId : 'offline_vault',
+          providerName: targetAcc ? targetAcc.providerName : 'Offline Vault',
           mirrorAccountId: null,
           offlinePinned: true,
           offlineCached: true,
@@ -235,6 +235,12 @@ export function App() {
       return;
     }
 
+    if (vault && vault.accounts.length === 0) {
+      showToast('Connect a real cloud storage account first to upload files');
+      setActiveTab('providers');
+      return;
+    }
+
     const fd = new FormData();
     for (const f of arr) fd.append('files', f);
     if (folderId) fd.append('folderId', folderId);
@@ -245,6 +251,11 @@ export function App() {
     });
     const data = await res.json();
     if (!res.ok) {
+      if (data.code === 'NO_CLOUD_ACCOUNT') {
+        showToast('Connect a real cloud storage account first to upload files');
+        setActiveTab('providers');
+        return;
+      }
       showToast(`Upload failed: ${data.error || 'Error'}`);
       return;
     }
@@ -265,7 +276,7 @@ export function App() {
 
     if (isOffline && vault) {
       const blob = new Blob([content], { type: mimeType });
-      const coreAcc = vault.accounts[0];
+      const targetAcc = vault.accounts[0] || null;
       const item: FileItem = {
         id,
         name,
@@ -273,9 +284,9 @@ export function App() {
         mimeType,
         kind,
         size: blob.size,
-        accountId: coreAcc.id,
-        providerId: coreAcc.providerId,
-        providerName: coreAcc.providerName,
+        accountId: targetAcc ? targetAcc.id : 'offline_vault',
+        providerId: targetAcc ? targetAcc.providerId : 'offline_vault',
+        providerName: targetAcc ? targetAcc.providerName : 'Offline Vault',
         mirrorAccountId: null,
         offlinePinned: true,
         offlineCached: true,
@@ -433,6 +444,16 @@ export function App() {
       });
     }
     if (currentFolderId === folder.id) setCurrentFolderId(null);
+    await refreshVault();
+  };
+
+  const handleRestoreFolder = async (folder: FolderItem) => {
+    if (isOffline) return;
+    await apiFetch(`/api/folders/${folder.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trashed: false }),
+    });
     await refreshVault();
   };
 
@@ -612,6 +633,7 @@ export function App() {
                 onTrashOrDeleteFile={handleTrashOrDeleteFile}
                 onRestoreFile={(f) => handlePatchFile(f.id, { trashed: false })}
                 onTrashOrDeleteFolder={handleTrashOrDeleteFolder}
+                onRestoreFolder={handleRestoreFolder}
               />
             )}
           </motion.main>

@@ -37,6 +37,7 @@ export interface StorageAccount {
   quotaBytes: number;
   usedBytes: number;
   baseExternalUsedBytes?: number;
+  verified?: boolean;
   sealedCredentials?: string | null;
   connectionMode: string;
   status: string;

@@ -1,8 +1,12 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { getProviderMeta } from './providers.mjs';
-import { sealCredentials, unsealCredentials } from './cloudAdapters.mjs';
+import { FREE_PROVIDER_CATALOG, getProviderMeta } from './providers.mjs';
+import {
+  sealCredentials,
+  unsealCredentials,
+  hasRealUpstreamCredentials,
+} from './cloudAdapters.mjs';
 
 export const DATA_DIR = process.env.VERCEL
   ? '/tmp/cloudy-data'
@@ -12,6 +16,16 @@ export const MOUNTS_DIR = path.join(DATA_DIR, 'mounts');
 
 fs.mkdirSync(VAULTS_DIR, { recursive: true });
 fs.mkdirSync(MOUNTS_DIR, { recursive: true });
+
+const VALID_PROVIDER_IDS = new Set(FREE_PROVIDER_CATALOG.map((p) => p.id));
+const FORBIDDEN_MODES = new Set([
+  'one_time_oauth',
+  'simulated',
+  'mock',
+  'demo',
+  'builtin',
+  'builtin_cloud',
+]);
 
 export function makeId(prefix = 'id') {
   return `${prefix}_${crypto.randomBytes(6).toString('hex')}`;
@@ -29,10 +43,84 @@ export function normalizeVaultId(raw) {
   return cleaned || 'default';
 }
 
+/**
+ * Cryptographically verifies that an account record represents a real,
+ * upstream-authenticated cloud storage account — NEVER a simulated/fake/builtin account.
+ */
+export function isGenuineVerifiedAccount(acc) {
+  if (!acc || typeof acc !== 'object') return false;
+  if (!VALID_PROVIDER_IDS.has(acc.providerId)) return false;
+  if (FORBIDDEN_MODES.has(String(acc.connectionMode || '').toLowerCase())) return false;
+  if (!acc.sealedCredentials || typeof acc.sealedCredentials !== 'string') return false;
+  const creds = unsealCredentials(acc.sealedCredentials);
+  return hasRealUpstreamCredentials(acc.providerId, creds);
+}
+
+/**
+ * Purges any legacy simulated, builtin, or unverified accounts from a vault state
+ * and repairs any fabricated legacy @github.com labels on real GitHub accounts.
+ */
+export function purgeFakeAccounts(db) {
+  if (!db || !Array.isArray(db.accounts)) return false;
+  let dirty = false;
+
+  const keptAccounts = [];
+  for (const acc of db.accounts) {
+    if (!isGenuineVerifiedAccount(acc)) {
+      dirty = true;
+      continue;
+    }
+    // Fix legacy fabricated "<login>@github.com" strings on real GitHub accounts
+    if (
+      acc.providerId === 'github_vault' &&
+      typeof acc.email === 'string' &&
+      acc.email.endsWith('@github.com')
+    ) {
+      const creds = unsealCredentials(acc.sealedCredentials);
+      const owner = creds?.owner || acc.email.split('@')[0];
+      acc.email = `@${owner} · github.com/${owner}`;
+      dirty = true;
+    }
+    keptAccounts.push(acc);
+  }
+
+  if (keptAccounts.length !== db.accounts.length) {
+    db.accounts = keptAccounts;
+    dirty = true;
+  }
+
+  const validAccIds = new Set(db.accounts.map((a) => a.id));
+  if (Array.isArray(db.files)) {
+    const cleanedFiles = [];
+    for (const f of db.files) {
+      if (f.accountId && !validAccIds.has(f.accountId)) {
+        if (f.importedRemote) {
+          dirty = true;
+          continue;
+        }
+        // Keep user notes/local files safely under Offline Vault rather than a fake cloud account
+        if (f.accountId !== 'offline_vault' || f.providerName !== 'Offline Vault') {
+          f.accountId = 'offline_vault';
+          f.providerId = 'offline_vault';
+          f.providerName = 'Offline Vault';
+          dirty = true;
+        }
+      }
+      if (f.mirrorAccountId && !validAccIds.has(f.mirrorAccountId)) {
+        f.mirrorAccountId = null;
+        dirty = true;
+      }
+      cleanedFiles.push(f);
+    }
+    db.files = cleanedFiles;
+  }
+
+  return dirty;
+}
+
 function createInitialState(vaultId) {
   const now = new Date().toISOString();
-  const coreAccountId = `acc_local_${vaultId.slice(0, 12)}`;
-  fs.mkdirSync(path.join(MOUNTS_DIR, coreAccountId), { recursive: true });
+  fs.mkdirSync(path.join(MOUNTS_DIR, 'offline_vault'), { recursive: true });
 
   const folderAi = {
     id: 'fld_ai_knowledge',
@@ -60,56 +148,15 @@ function createInitialState(vaultId) {
 
 Free Storage. One System. Your Rules.
 
-- **Real Cloud Storage**: Open **Storage** to connect MEGA (20 GB), Google Drive (15 GB), Storj (25 GB), Cloudflare R2 (10 GB), Backblaze B2 (10 GB), Box (10 GB), Koofr (10 GB), OneDrive (5 GB), GitHub, Dropbox, or Supabase Storage.
-- **Online ↔ Offline**: Files and carpetas added online automatically sync to your device's IndexedDB Offline Vault.
-- **Local AI API**: Open **AI API** to copy your \`cldy_sk_...\` key for Ollama, llama.cpp, or Python scripts.
+- **100% Real Cloud Accounts**: Open **Cloud Pool** to connect real storage accounts — GitHub Cloud, Microsoft OneDrive, MEGA (20 GB), pCloud (10 GB), Nextcloud, Google Drive (15 GB), Storj (25 GB), Cloudflare R2, Backblaze B2, Koofr, Box, Dropbox, or Supabase Storage.
+- **Online ↔ Offline**: Carpetas, notes, and pinned files sync automatically to your device's IndexedDB Offline Vault.
+- **Local AI API**: Open **Local AI API** to copy your \`cldy_sk_...\` key for Ollama, DeepSeek, Qwen, llama.cpp, or Python scripts.
 `;
 
   const buf = Buffer.from(quickstartMd, 'utf8');
-  writeAccountBinary(coreAccountId, 'fil_welcome', buf);
+  writeAccountBinary('offline_vault', 'fil_welcome', buf);
 
   const defaultKey = generateApiKeyString();
-
-  const initialAccounts = [
-    {
-      id: coreAccountId,
-      providerId: 'xkilo_core',
-      providerName: 'Local Vault',
-      accountLabel: 'Local Device Vault',
-      email: 'Offline + Local Cache',
-      quotaBytes: 5 * 1024 * 1024 * 1024,
-      usedBytes: buf.byteLength,
-      baseExternalUsedBytes: 0,
-      connectionMode: 'builtin',
-      status: 'connected',
-      connectedAt: now,
-      lastSyncedAt: now,
-    },
-  ];
-
-  // Auto-mount real persistent X-Kilo Cloud Storage (Supabase) with ZERO user setup when configured!
-  if (process.env.CLOUDY_SUPABASE_URL && process.env.CLOUDY_SUPABASE_SERVICE_KEY) {
-    initialAccounts.push({
-      id: `acc_xkilo_cloud_${vaultId.slice(0, 10)}`,
-      providerId: 'supabase_storage',
-      providerName: 'X-Kilo Cloud',
-      accountLabel: 'X-Kilo Cloud (Instant)',
-      email: 'Ready · Zero Setup',
-      quotaBytes: 1 * 1024 * 1024 * 1024,
-      usedBytes: 0,
-      baseExternalUsedBytes: 0,
-      connectionMode: 'builtin_cloud',
-      sealedCredentials: sealCredentials({
-        projectUrl: process.env.CLOUDY_SUPABASE_URL,
-        apiKey: process.env.CLOUDY_SUPABASE_SERVICE_KEY,
-        bucket: 'cloudy-vault',
-        keyPrefix: `${vaultId}/`,
-      }),
-      status: 'connected',
-      connectedAt: now,
-      lastSyncedAt: now,
-    });
-  }
 
   return {
     vaultId,
@@ -118,7 +165,8 @@ Free Storage. One System. Your Rules.
       autoOfflineSync: true,
     },
     oauthApps: {},
-    accounts: initialAccounts,
+    // Zero fake or pre-created storage accounts — only real authenticated accounts appear here
+    accounts: [],
     folders: [folderAi, folderDocs],
     files: [
       {
@@ -128,9 +176,9 @@ Free Storage. One System. Your Rules.
         mimeType: 'text/markdown',
         kind: 'note',
         size: buf.byteLength,
-        accountId: coreAccountId,
-        providerId: 'xkilo_core',
-        providerName: 'Local Vault',
+        accountId: 'offline_vault',
+        providerId: 'offline_vault',
+        providerName: 'Offline Vault',
         mirrorAccountId: null,
         offlinePinned: true,
         starred: false,
@@ -209,11 +257,15 @@ export async function ensureVaultLoaded(rawVaultId = 'default') {
   if (!hydratedFromRemote.has(vaultId)) {
     hydratedFromRemote.add(vaultId);
     const remoteState = await fetchRemoteVaultState(vaultId);
-    if (remoteState && remoteState.accounts) {
+    if (remoteState && Array.isArray(remoteState.accounts)) {
+      const wasDirty = purgeFakeAccounts(remoteState);
       recalcAccountUsage(remoteState);
       memoryVaults.set(vaultId, remoteState);
       const vaultPath = path.join(VAULTS_DIR, `${vaultId}.json`);
       fs.writeFileSync(vaultPath, JSON.stringify(remoteState, null, 2), 'utf8');
+      if (wasDirty) {
+        pushRemoteVaultState(vaultId, remoteState);
+      }
       return remoteState;
     }
   }
@@ -222,14 +274,23 @@ export async function ensureVaultLoaded(rawVaultId = 'default') {
 
 export function loadDb(rawVaultId = 'default') {
   const vaultId = normalizeVaultId(rawVaultId);
-  if (memoryVaults.has(vaultId)) return memoryVaults.get(vaultId);
+  if (memoryVaults.has(vaultId)) {
+    const mem = memoryVaults.get(vaultId);
+    if (purgeFakeAccounts(mem)) {
+      recalcAccountUsage(mem);
+      saveDb(vaultId);
+    }
+    return mem;
+  }
 
   const vaultPath = path.join(VAULTS_DIR, `${vaultId}.json`);
   if (fs.existsSync(vaultPath)) {
     try {
       const parsed = JSON.parse(fs.readFileSync(vaultPath, 'utf8'));
+      const wasDirty = purgeFakeAccounts(parsed);
       recalcAccountUsage(parsed);
       memoryVaults.set(vaultId, parsed);
+      if (wasDirty) saveDb(vaultId);
       return parsed;
     } catch {
       // recreate if corrupted
@@ -246,6 +307,7 @@ export function saveDb(rawVaultId = 'default') {
   const vaultId = normalizeVaultId(rawVaultId);
   const db = memoryVaults.get(vaultId);
   if (!db) return;
+  purgeFakeAccounts(db);
   recalcAccountUsage(db);
   const vaultPath = path.join(VAULTS_DIR, `${vaultId}.json`);
   fs.writeFileSync(vaultPath, JSON.stringify(db, null, 2), 'utf8');
@@ -253,12 +315,10 @@ export function saveDb(rawVaultId = 'default') {
 }
 
 export function findDbByApiKey(token) {
-  // Check loaded vaults first
   for (const [, db] of memoryVaults) {
     const matched = db.apiKeys.find((k) => k.key === token && k.active !== false);
     if (matched) return { db, matched };
   }
-  // Scan saved vault files on disk
   if (fs.existsSync(VAULTS_DIR)) {
     for (const file of fs.readdirSync(VAULTS_DIR)) {
       if (!file.endsWith('.json')) continue;
@@ -271,9 +331,49 @@ export function findDbByApiKey(token) {
   return null;
 }
 
+export async function findDbByApiKeyAsync(token) {
+  const localHit = findDbByApiKey(token);
+  if (localHit) return localHit;
+
+  // Serverless cold-start lookup across durable Supabase PostgreSQL vaults
+  const sbUrl = process.env.CLOUDY_SUPABASE_URL;
+  const sbKey = process.env.CLOUDY_SUPABASE_SERVICE_KEY;
+  if (!sbUrl || !sbKey) return null;
+
+  try {
+    const res = await fetch(
+      `${sbUrl}/rest/v1/cloudy_vault_states?select=vault_id,state_json&limit=100`,
+      {
+        headers: {
+          apikey: sbKey,
+          Authorization: `Bearer ${sbKey}`,
+        },
+      }
+    );
+    if (!res.ok) return null;
+    const rows = await res.json();
+    for (const row of rows || []) {
+      const state = row.state_json;
+      if (!state?.apiKeys) continue;
+      const matched = state.apiKeys.find((k) => k.key === token && k.active !== false);
+      if (matched) {
+        const vid = normalizeVaultId(row.vault_id || state.vaultId);
+        purgeFakeAccounts(state);
+        recalcAccountUsage(state);
+        memoryVaults.set(vid, state);
+        hydratedFromRemote.add(vid);
+        return { db: state, matched };
+      }
+    }
+  } catch {
+    // ignore network failure
+  }
+  return null;
+}
+
 export function recalcAccountUsage(db) {
   const cloudyUsageMap = new Map();
-  for (const f of db.files) {
+  for (const f of db.files || []) {
     if (f.trashed || f.importedRemote) continue;
     cloudyUsageMap.set(f.accountId, (cloudyUsageMap.get(f.accountId) || 0) + (f.size || 0));
     if (f.mirrorAccountId) {
@@ -283,16 +383,22 @@ export function recalcAccountUsage(db) {
       );
     }
   }
-  for (const acc of db.accounts) {
+  for (const acc of db.accounts || []) {
     const base = Number(acc.baseExternalUsedBytes || 0);
     acc.usedBytes = base + (cloudyUsageMap.get(acc.id) || 0);
   }
 }
 
 export function selectTargetAccount(db, fileSize = 0, mimeType = '', preferredAccountId = null) {
-  const activeAccounts = db.accounts.filter((a) => a.status === 'connected');
+  const activeAccounts = (db.accounts || []).filter(
+    (a) => a.status === 'connected' && isGenuineVerifiedAccount(a)
+  );
   if (activeAccounts.length === 0) {
-    throw new Error('No connected storage accounts available');
+    const err = new Error(
+      'No real cloud storage account connected yet. Open Cloud Pool and sign in to a real provider (GitHub, OneDrive, MEGA, pCloud, Nextcloud, Google Drive, etc.) first.'
+    );
+    err.code = 'NO_CLOUD_ACCOUNT';
+    throw err;
   }
 
   if (preferredAccountId && preferredAccountId !== 'auto') {
@@ -301,24 +407,31 @@ export function selectTargetAccount(db, fileSize = 0, mimeType = '', preferredAc
   }
 
   const candidates = activeAccounts.filter((a) => a.quotaBytes - a.usedBytes >= fileSize);
-  const pool = candidates.length > 0 ? candidates : activeAccounts;
+  const workingPool = candidates.length > 0 ? candidates : activeAccounts;
   const rule = db.settings?.allocationRule || 'most_free';
 
-  // Prefer connected real external cloud providers over local device vault
-  const externalPool = pool.filter((a) => a.providerId !== 'xkilo_core');
-  const workingPool = externalPool.length > 0 ? externalPool : pool;
-
   if (rule === 'waterfall') {
-    const nonFull = workingPool.find((a) => a.usedBytes / Math.max(a.quotaBytes, 1) < 0.95) || workingPool[0];
+    const nonFull =
+      workingPool.find((a) => a.usedBytes / Math.max(a.quotaBytes, 1) < 0.95) ||
+      workingPool[0];
     return { primary: nonFull, mirror: null };
   }
 
   if (rule === 'by_type') {
     const lowerMime = (mimeType || '').toLowerCase();
     let preferredIds = ['google_drive', 'box', 'onedrive', 'dropbox', 'koofr'];
-    if (lowerMime.startsWith('image/') || lowerMime.startsWith('video/') || lowerMime.startsWith('audio/') || fileSize > 10 * 1024 * 1024) {
+    if (
+      lowerMime.startsWith('image/') ||
+      lowerMime.startsWith('video/') ||
+      lowerMime.startsWith('audio/') ||
+      fileSize > 10 * 1024 * 1024
+    ) {
       preferredIds = ['mega', 'storj', 'cloudflare_r2', 'backblaze_b2', 'pcloud'];
-    } else if (lowerMime.includes('json') || lowerMime.includes('javascript') || lowerMime.includes('python')) {
+    } else if (
+      lowerMime.includes('json') ||
+      lowerMime.includes('javascript') ||
+      lowerMime.includes('python')
+    ) {
       preferredIds = ['github_vault', 'cloudflare_r2', 'supabase_storage', 'dropbox'];
     }
     const matched = workingPool.find((a) => preferredIds.includes(a.providerId));
@@ -330,14 +443,15 @@ export function selectTargetAccount(db, fileSize = 0, mimeType = '', preferredAc
   );
   const primary = sorted[0];
   let mirror = null;
-  if (rule === 'mirror' && pool.length > 1) {
-    mirror = pool.find((a) => a.id !== primary.id) || null;
+  if (rule === 'mirror' && workingPool.length > 1) {
+    mirror = workingPool.find((a) => a.id !== primary.id) || null;
   }
   return { primary, mirror };
 }
 
 export function writeAccountBinary(accountId, fileId, buffer) {
-  const dir = path.join(MOUNTS_DIR, accountId);
+  const safeAcc = accountId || 'offline_vault';
+  const dir = path.join(MOUNTS_DIR, safeAcc);
   fs.mkdirSync(dir, { recursive: true });
   const filePath = path.join(dir, fileId);
   fs.writeFileSync(filePath, buffer);
@@ -345,7 +459,8 @@ export function writeAccountBinary(accountId, fileId, buffer) {
 }
 
 export function readAccountBinary(accountId, fileId, fallbackAccountId = null) {
-  const primaryPath = path.join(MOUNTS_DIR, accountId, fileId);
+  const safeAcc = accountId || 'offline_vault';
+  const primaryPath = path.join(MOUNTS_DIR, safeAcc, fileId);
   if (fs.existsSync(primaryPath)) {
     return fs.readFileSync(primaryPath);
   }
@@ -374,21 +489,39 @@ export function deleteAccountBinary(accountId, fileId, mirrorAccountId = null) {
 
 export function addVerifiedProviderAccount(
   db,
-  { providerId, email, accountLabel, quotaBytes, usedBytes, credentials, connectionMode = 'verified_cloud' }
+  {
+    providerId,
+    email,
+    accountLabel,
+    quotaBytes,
+    usedBytes,
+    credentials,
+    connectionMode = 'verified_cloud',
+  }
 ) {
   const meta = getProviderMeta(providerId);
-  if (!meta) throw new Error(`Unknown provider: ${providerId}`);
+  if (!meta || !VALID_PROVIDER_IDS.has(providerId)) {
+    throw new Error(`Unknown provider: ${providerId}`);
+  }
+  if (!hasRealUpstreamCredentials(providerId, credentials)) {
+    throw new Error(`Cannot add unverified storage account for ${meta.name}.`);
+  }
+  if (!email || !String(email).trim()) {
+    throw new Error(`Upstream provider did not return a valid account identity.`);
+  }
 
   const now = new Date().toISOString();
   const sealed = sealCredentials(credentials);
 
-  // Update existing account if same provider + email reconnected
   const existing = db.accounts.find(
-    (a) => a.providerId === providerId && a.email.toLowerCase() === String(email).toLowerCase()
+    (a) =>
+      a.providerId === providerId &&
+      String(a.email).toLowerCase() === String(email).trim().toLowerCase()
   );
 
   if (existing) {
     existing.accountLabel = accountLabel || existing.accountLabel;
+    existing.email = String(email).trim();
     existing.quotaBytes = quotaBytes;
     existing.baseExternalUsedBytes = usedBytes;
     existing.usedBytes = usedBytes;
@@ -408,7 +541,7 @@ export function addVerifiedProviderAccount(
     providerId: meta.id,
     providerName: meta.name,
     accountLabel: accountLabel || meta.name,
-    email,
+    email: String(email).trim(),
     quotaBytes,
     baseExternalUsedBytes: usedBytes,
     usedBytes,
@@ -432,6 +565,6 @@ export function getUnsealedAccount(acc) {
 }
 
 export function sanitizeAccount(acc) {
-  const { credentials, ...safe } = acc;
-  return safe;
+  const { credentials, sealedCredentials, ...safe } = acc;
+  return { ...safe, verified: true };
 }

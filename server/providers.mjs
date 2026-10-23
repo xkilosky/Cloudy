@@ -54,7 +54,7 @@ export const FREE_PROVIDER_CATALOG = [
     consoleUrl: 'https://github.com/settings/tokens/new?scopes=repo&description=Cloudy-XKilo',
     authorizeUrl: 'https://github.com/login/oauth/authorize',
     tokenUrl: 'https://github.com/login/oauth/access_token',
-    scopes: ['repo', 'read:user'],
+    scopes: ['repo', 'read:user', 'user:email'],
     extraAuthParams: {},
     description: '1-Click Sign in with GitHub popup — auto-creates your private cloud vault in seconds.',
   },

@@ -69,6 +69,10 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
   }, []);
 
   useEffect(() => {
+    if (pollTimerRef.current) {
+      window.clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
     if (!provider) return;
     setErrorMsg(null);
     setLoading(false);
@@ -76,7 +80,6 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
     setNcPolling(false);
     setShowMfa(false);
     setSmartPayload('');
-    if (pollTimerRef.current) window.clearInterval(pollTimerRef.current);
   }, [provider]);
 
   const isDeviceFlowProvider =

@@ -42,9 +42,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   theme,
   onChangeTheme,
 }) => {
-  const totalQuota = Math.max(vault.summary.totalQuotaBytes || 1, 1);
+  const rawQuota = vault.summary.totalQuotaBytes || 0;
   const totalUsed = vault.summary.totalUsedBytes || 0;
-  const usedPct = Math.min(100, (totalUsed / totalQuota) * 100);
+  const usedPct = rawQuota > 0 ? Math.min(100, (totalUsed / rawQuota) * 100) : 0;
 
   return (
     <motion.aside
@@ -218,19 +218,21 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <div className="flex items-center justify-between text-xs">
               <span className="text-ink-secondary font-medium">Pooled Space</span>
               <span className="font-mono font-semibold text-ink tabular-nums">
-                {formatBytes(totalQuota, 0)}
+                {rawQuota > 0 ? formatBytes(rawQuota, 0) : '0 GB'}
               </span>
             </div>
             <div className="h-1.5 rounded-full bg-canvas overflow-hidden">
               <motion.div
                 initial={{ width: 0 }}
-                animate={{ width: `${Math.max(3, usedPct)}%` }}
+                animate={{ width: `${rawQuota > 0 ? Math.max(3, usedPct) : 0}%` }}
                 transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
                 className="h-full rounded-full bg-accent"
               />
             </div>
             <div className="flex items-center justify-between text-[11px] text-ink-muted">
-              <span>{formatBytes(totalUsed)} used</span>
+              <span>
+                {rawQuota > 0 ? `${formatBytes(totalUsed)} used` : 'No cloud connected'}
+              </span>
               <span className="text-accent font-medium">+ Add Cloud</span>
             </div>
           </motion.button>

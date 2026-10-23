@@ -11,6 +11,7 @@ import {
   readAccountBinary,
   deleteAccountBinary,
   addVerifiedProviderAccount,
+  isGenuineVerifiedAccount,
   getUnsealedAccount,
   sanitizeAccount,
   generateApiKeyString,
@@ -195,7 +196,8 @@ app.post('/api/vault/hydrate', (req, res) => {
 
   const existingAccIds = new Set(db.accounts.map((a) => a.id));
   for (const acc of accounts) {
-    if (acc?.id && acc.providerId !== 'xkilo_core' && !existingAccIds.has(acc.id)) {
+    // STRICT GATE: Never hydrate simulated, builtin, or unverified accounts!
+    if (acc?.id && isGenuineVerifiedAccount(acc) && !existingAccIds.has(acc.id)) {
       db.accounts.push({ ...acc, status: 'connected' });
       existingAccIds.add(acc.id);
     }
@@ -213,7 +215,11 @@ app.post('/api/vault/hydrate', (req, res) => {
   for (const fl of files) {
     if (fl?.id && !existingFileIds.has(fl.id)) {
       if (typeof fl.textContent === 'string') {
-        writeAccountBinary(fl.accountId || db.accounts[0]?.id, fl.id, Buffer.from(fl.textContent, 'utf8'));
+        writeAccountBinary(
+          fl.accountId || 'offline_vault',
+          fl.id,
+          Buffer.from(fl.textContent, 'utf8')
+        );
       }
       db.files.push(fl);
       existingFileIds.add(fl.id);
@@ -298,7 +304,7 @@ app.get('/api/oauth/callback', async (req, res) => {
       (pid) => getOAuthConfigForProvider(loadDb('default'), pid)
     );
 
-    const db = loadDb(tokenBundle.vaultId || 'default');
+    const db = await ensureVaultLoaded(tokenBundle.vaultId || 'default');
     const verified = await verifyAndInspectProvider(tokenBundle.providerId, tokenBundle);
     const account = addVerifiedProviderAccount(db, {
       providerId: tokenBundle.providerId,
@@ -523,9 +529,6 @@ app.post('/api/accounts/:id/sync', async (req, res) => {
     const db = loadDb(reqVaultId(req));
     const acc = db.accounts.find((a) => a.id === req.params.id);
     if (!acc) return res.status(404).json({ ok: false, error: 'Account not found' });
-    if (acc.providerId === 'xkilo_core') {
-      return res.json({ ok: true, importedCount: 0, account: sanitizeAccount(acc) });
-    }
 
     const unsealed = getUnsealedAccount(acc);
     if (unsealed.credentials) {
@@ -548,25 +551,24 @@ app.delete('/api/accounts/:id', (req, res) => {
   const db = loadDb(reqVaultId(req));
   const acc = db.accounts.find((a) => a.id === req.params.id);
   if (!acc) return res.status(404).json({ ok: false, error: 'Account not found' });
-  if (acc.providerId === 'xkilo_core') {
-    return res.status(400).json({ ok: false, error: 'Built-in Local Vault cannot be removed.' });
-  }
 
-  const coreAcc = db.accounts.find((a) => a.providerId === 'xkilo_core') || db.accounts[0];
+  db.accounts = db.accounts.filter((a) => a.id !== acc.id);
+  const remainingPrimary = db.accounts[0] || null;
+
   db.files = db.files.filter((f) => !(f.accountId === acc.id && f.importedRemote));
 
   for (const f of db.files) {
     if (f.accountId === acc.id) {
       const buf = readAccountBinary(acc.id, f.id, f.mirrorAccountId);
-      if (buf) writeAccountBinary(coreAcc.id, f.id, buf);
-      f.accountId = coreAcc.id;
-      f.providerId = coreAcc.providerId;
-      f.providerName = coreAcc.providerName;
+      const nextAccId = remainingPrimary ? remainingPrimary.id : 'offline_vault';
+      if (buf) writeAccountBinary(nextAccId, f.id, buf);
+      f.accountId = nextAccId;
+      f.providerId = remainingPrimary ? remainingPrimary.providerId : 'offline_vault';
+      f.providerName = remainingPrimary ? remainingPrimary.providerName : 'Offline Vault';
     }
     if (f.mirrorAccountId === acc.id) f.mirrorAccountId = null;
   }
 
-  db.accounts = db.accounts.filter((a) => a.id !== acc.id);
   saveDb(db.vaultId);
   res.json({ ok: true });
 });
@@ -659,20 +661,16 @@ app.post('/api/files/upload', upload.array('files', 20), async (req, res) => {
       const { primary, mirror } = selectTargetAccount(db, f.size, mimeType, preferredAccountId);
       const id = i === 0 && customId ? String(customId) : makeId('fil');
 
-      // Upload to real upstream cloud provider if primary is an external cloud account!
-      let remoteMeta = null;
-      if (primary.providerId !== 'xkilo_core') {
-        remoteMeta = await uploadFileToRemoteProvider(
-          getUnsealedAccount(primary),
-          f.originalname,
-          f.buffer,
-          mimeType,
-          (pid) => getOAuthConfigForProvider(db, pid),
-          makeTokenUpdateHandler(db, primary)
-        );
-      }
+      const remoteMeta = await uploadFileToRemoteProvider(
+        getUnsealedAccount(primary),
+        f.originalname,
+        f.buffer,
+        mimeType,
+        (pid) => getOAuthConfigForProvider(db, pid),
+        makeTokenUpdateHandler(db, primary)
+      );
 
-      if (mirror && mirror.providerId !== 'xkilo_core') {
+      if (mirror) {
         await uploadFileToRemoteProvider(
           getUnsealedAccount(mirror),
           f.originalname,
@@ -726,11 +724,15 @@ app.post('/api/files/upload', upload.array('files', 20), async (req, res) => {
     saveDb(db.vaultId);
     res.status(201).json({ ok: true, files: created });
   } catch (err) {
-    res.status(400).json({ ok: false, error: String(err.message || err) });
+    res.status(400).json({
+      ok: false,
+      code: err.code || undefined,
+      error: String(err.message || err),
+    });
   }
 });
 
-// Create Note / Dataset (Also uploads to Real Connected Cloud Provider!)
+// Create Note / Dataset (Uploads to Real Connected Cloud Provider when connected, or Offline Vault!)
 app.post('/api/files/note', async (req, res) => {
   try {
     const db = loadDb(reqVaultId(req));
@@ -750,11 +752,16 @@ app.post('/api/files/note', async (req, res) => {
     }
 
     const buf = Buffer.from(String(content), 'utf8');
-    const { primary, mirror } = selectTargetAccount(db, buf.byteLength, mimeType, accountId);
     const id = clientId && String(clientId).startsWith('fil_') ? String(clientId) : makeId('fil');
 
+    let targetAccountId = 'offline_vault';
+    let targetProviderId = 'offline_vault';
+    let targetProviderName = 'Offline Vault';
+    let mirrorAccountId = null;
     let remoteMeta = null;
-    if (primary.providerId !== 'xkilo_core') {
+
+    if (db.accounts.length > 0) {
+      const { primary, mirror } = selectTargetAccount(db, buf.byteLength, mimeType, accountId);
       remoteMeta = await uploadFileToRemoteProvider(
         getUnsealedAccount(primary),
         String(name).trim(),
@@ -763,10 +770,14 @@ app.post('/api/files/note', async (req, res) => {
         (pid) => getOAuthConfigForProvider(db, pid),
         makeTokenUpdateHandler(db, primary)
       );
+      targetAccountId = primary.id;
+      targetProviderId = primary.providerId;
+      targetProviderName = primary.providerName;
+      mirrorAccountId = mirror ? mirror.id : null;
+      if (mirror) writeAccountBinary(mirror.id, id, buf);
     }
 
-    writeAccountBinary(primary.id, id, buf);
-    if (mirror) writeAccountBinary(mirror.id, id, buf);
+    writeAccountBinary(targetAccountId, id, buf);
 
     const now = new Date().toISOString();
     const record = {
@@ -776,13 +787,13 @@ app.post('/api/files/note', async (req, res) => {
       mimeType,
       kind,
       size: buf.byteLength,
-      accountId: primary.id,
-      providerId: primary.providerId,
-      providerName: primary.providerName,
+      accountId: targetAccountId,
+      providerId: targetProviderId,
+      providerName: targetProviderName,
       remoteId: remoteMeta?.remoteId || null,
       remotePath: remoteMeta?.remotePath || null,
       webUrl: remoteMeta?.webUrl || null,
-      mirrorAccountId: mirror ? mirror.id : null,
+      mirrorAccountId,
       offlinePinned: true,
       starred: false,
       trashed: false,
@@ -826,12 +837,32 @@ app.patch('/api/files/:id', async (req, res) => {
       writeAccountBinary(file.accountId, file.id, buf);
       file.textContent = textContent;
       file.size = buf.byteLength;
+
+      const owningAcc = db.accounts.find((a) => a.id === file.accountId);
+      if (owningAcc && isGenuineVerifiedAccount(owningAcc)) {
+        const remoteMeta = await uploadFileToRemoteProvider(
+          getUnsealedAccount(owningAcc),
+          file.name,
+          buf,
+          file.mimeType || 'text/plain',
+          (pid) => getOAuthConfigForProvider(db, pid),
+          makeTokenUpdateHandler(db, owningAcc)
+        );
+        if (remoteMeta) {
+          file.remoteId = remoteMeta.remoteId || file.remoteId;
+          file.remotePath = remoteMeta.remotePath || file.remotePath;
+          file.webUrl = remoteMeta.webUrl || file.webUrl;
+        }
+      }
     }
 
     if (targetAccountId && targetAccountId !== file.accountId) {
       const nextAcc = db.accounts.find((a) => a.id === targetAccountId);
-      if (nextAcc) {
+      if (nextAcc && isGenuineVerifiedAccount(nextAcc)) {
         let buf = readAccountBinary(file.accountId, file.id, file.mirrorAccountId);
+        if (!buf && typeof file.textContent === 'string') {
+          buf = Buffer.from(file.textContent, 'utf8');
+        }
         if (!buf && (file.remoteId || file.remotePath)) {
           const oldAcc = db.accounts.find((a) => a.id === file.accountId);
           if (oldAcc) {
@@ -844,19 +875,17 @@ app.patch('/api/files/:id', async (req, res) => {
           }
         }
         if (buf) {
-          if (nextAcc.providerId !== 'xkilo_core') {
-            const remoteMeta = await uploadFileToRemoteProvider(
-              getUnsealedAccount(nextAcc),
-              file.name,
-              buf,
-              file.mimeType || 'application/octet-stream',
-              (pid) => getOAuthConfigForProvider(db, pid),
-              makeTokenUpdateHandler(db, nextAcc)
-            );
-            file.remoteId = remoteMeta?.remoteId || null;
-            file.remotePath = remoteMeta?.remotePath || null;
-            file.webUrl = remoteMeta?.webUrl || null;
-          }
+          const remoteMeta = await uploadFileToRemoteProvider(
+            getUnsealedAccount(nextAcc),
+            file.name,
+            buf,
+            file.mimeType || 'application/octet-stream',
+            (pid) => getOAuthConfigForProvider(db, pid),
+            makeTokenUpdateHandler(db, nextAcc)
+          );
+          file.remoteId = remoteMeta?.remoteId || null;
+          file.remotePath = remoteMeta?.remotePath || null;
+          file.webUrl = remoteMeta?.webUrl || null;
           writeAccountBinary(nextAcc.id, file.id, buf);
         }
         file.accountId = nextAcc.id;
@@ -873,7 +902,7 @@ app.patch('/api/files/:id', async (req, res) => {
   }
 });
 
-// Serve or Stream Binary (from Local Cache OR Live Upstream Cloud Download!)
+// Serve or Stream Binary (from Local Cache, Text Vault, OR Live Upstream Cloud Download!)
 app.get('/api/files/:id/blob', async (req, res) => {
   try {
     const db = loadDb(reqVaultId(req));
@@ -898,6 +927,9 @@ app.get('/api/files/:id/blob', async (req, res) => {
           }
         }
       }
+    }
+    if (!buf && typeof file.textContent === 'string') {
+      buf = Buffer.from(file.textContent, 'utf8');
     }
 
     if (!buf) return res.status(404).json({ ok: false, error: 'Binary missing from cloud storage' });

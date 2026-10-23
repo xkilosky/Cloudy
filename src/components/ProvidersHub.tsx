@@ -58,9 +58,9 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
   const [rcloneErr, setRcloneErr] = useState<string | null>(null);
   const confFileRef = useRef<HTMLInputElement>(null);
 
-  const totalQuota = Math.max(vault.summary.totalQuotaBytes || 1, 1);
+  const rawQuota = vault.summary.totalQuotaBytes || 0;
   const totalUsed = vault.summary.totalUsedBytes || 0;
-  const usedPct = Math.min(100, (totalUsed / totalQuota) * 100);
+  const usedPct = rawQuota > 0 ? Math.min(100, (totalUsed / rawQuota) * 100) : 0;
 
   const handleSync = async (id: string) => {
     setSyncingAccId(id);
@@ -121,16 +121,18 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
             </div>
             <div className="flex items-baseline gap-3">
               <span className="text-3xl sm:text-4xl font-bold text-ink font-mono tabular-nums tracking-tight">
-                {formatBytes(totalQuota, 1)}
+                {rawQuota > 0 ? formatBytes(rawQuota, 1) : '0 GB'}
               </span>
               <span className="text-sm text-ink-muted font-mono tabular-nums">
-                {formatBytes(totalUsed)} used
+                {rawQuota > 0
+                  ? `${formatBytes(totalUsed)} used`
+                  : 'Connect a real account below'}
               </span>
             </div>
             <div className="h-2 w-full rounded-full bg-canvas overflow-hidden">
               <motion.div
                 initial={{ width: 0 }}
-                animate={{ width: `${Math.max(3, usedPct)}%` }}
+                animate={{ width: `${rawQuota > 0 ? Math.max(3, usedPct) : 0}%` }}
                 transition={{ duration: 0.8, ease: [0.22, 1, 0.36, 1] }}
                 className="h-full bg-accent rounded-full"
               />
@@ -185,82 +187,85 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
         {/* Connected Accounts */}
         <section className="space-y-3.5">
           <h2 className="text-[11px] font-medium uppercase tracking-wider text-ink-muted px-0.5">
-            Active Cloud Mounts · {vault.accounts.length}
+            Verified Connected Accounts · {vault.accounts.length}
           </h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
-            {vault.accounts.map((acc, idx) => {
-              const pct = Math.min(
-                100,
-                (acc.usedBytes / Math.max(acc.quotaBytes, 1)) * 100
-              );
-              const isCore =
-                acc.providerId === 'xkilo_core' ||
-                acc.connectionMode === 'builtin_cloud';
-              return (
-                <motion.div
-                  key={acc.id}
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.22, delay: Math.min(idx * 0.04, 0.2) }}
-                  whileHover={{ y: -2 }}
-                  className="rounded-2xl bg-surface border border-line hover:border-line-strong p-5 flex flex-col justify-between gap-4 shadow-card transition-colors"
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="text-[13.5px] font-semibold text-ink truncate flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-[#10A37F] shrink-0" />
-                        <span className="truncate">{acc.accountLabel}</span>
+          {vault.accounts.length === 0 ? (
+            <div className="rounded-2xl border border-dashed border-line-strong bg-surface/40 p-6 text-center text-xs text-ink-secondary">
+              No storage accounts connected yet. Every account below authenticates directly against the real provider — sign in to stack free storage.
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
+              {vault.accounts.map((acc, idx) => {
+                const pct = Math.min(
+                  100,
+                  (acc.usedBytes / Math.max(acc.quotaBytes, 1)) * 100
+                );
+                return (
+                  <motion.div
+                    key={acc.id}
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.22, delay: Math.min(idx * 0.04, 0.2) }}
+                    whileHover={{ y: -2 }}
+                    className="rounded-2xl bg-surface border border-line hover:border-line-strong p-5 flex flex-col justify-between gap-4 shadow-card transition-colors"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="text-[13.5px] font-semibold text-ink truncate flex items-center gap-2">
+                          <span className="w-2 h-2 rounded-full bg-[#10A37F] shrink-0" />
+                          <span className="truncate">{acc.accountLabel}</span>
+                        </div>
+                        <div className="text-xs text-ink-muted truncate mt-0.5">
+                          {acc.email}
+                        </div>
                       </div>
-                      <div className="text-xs text-ink-muted truncate mt-0.5">
-                        {acc.email}
-                      </div>
+
+                      {!isOffline && (
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            onClick={() => handleSync(acc.id)}
+                            disabled={syncingAccId === acc.id}
+                            className="p-1.5 rounded-lg text-ink-secondary hover:text-ink hover:bg-elevated transition"
+                            title="Sync remote files & quota"
+                          >
+                            <RefreshCw
+                              className={`w-3.5 h-3.5 ${
+                                syncingAccId === acc.id ? 'animate-spin text-accent' : ''
+                              }`}
+                            />
+                          </button>
+                          <button
+                            onClick={() => onDisconnectAccount(acc.id)}
+                            className="p-1.5 rounded-lg text-ink-muted hover:text-red-400 hover:bg-elevated transition"
+                            title="Disconnect account"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      )}
                     </div>
 
-                    {!isCore && !isOffline && (
-                      <div className="flex items-center gap-1 shrink-0">
-                        <button
-                          onClick={() => handleSync(acc.id)}
-                          disabled={syncingAccId === acc.id}
-                          className="p-1.5 rounded-lg text-ink-secondary hover:text-ink hover:bg-elevated transition"
-                          title="Sync remote files & quota"
-                        >
-                          <RefreshCw
-                            className={`w-3.5 h-3.5 ${
-                              syncingAccId === acc.id ? 'animate-spin text-accent' : ''
-                            }`}
-                          />
-                        </button>
-                        <button
-                          onClick={() => onDisconnectAccount(acc.id)}
-                          className="p-1.5 rounded-lg text-ink-muted hover:text-red-400 hover:bg-elevated transition"
-                          title="Disconnect account"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                    <div className="space-y-1.5">
+                      <div className="flex justify-between text-xs font-mono text-ink-secondary tabular-nums">
+                        <span>{formatBytes(acc.usedBytes)}</span>
+                        <span className="text-ink font-medium">
+                          {formatBytes(acc.quotaBytes, 0)}
+                        </span>
                       </div>
-                    )}
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <div className="flex justify-between text-xs font-mono text-ink-secondary tabular-nums">
-                      <span>{formatBytes(acc.usedBytes)}</span>
-                      <span className="text-ink font-medium">
-                        {formatBytes(acc.quotaBytes, 0)}
-                      </span>
+                      <div className="h-1.5 rounded-full bg-canvas overflow-hidden">
+                        <motion.div
+                          initial={{ width: 0 }}
+                          animate={{ width: `${Math.max(3, pct)}%` }}
+                          transition={{ duration: 0.65, ease: [0.22, 1, 0.36, 1] }}
+                          className="h-full bg-accent rounded-full"
+                        />
+                      </div>
                     </div>
-                    <div className="h-1.5 rounded-full bg-canvas overflow-hidden">
-                      <motion.div
-                        initial={{ width: 0 }}
-                        animate={{ width: `${Math.max(3, pct)}%` }}
-                        transition={{ duration: 0.65, ease: [0.22, 1, 0.36, 1] }}
-                        className="h-full bg-accent rounded-full"
-                      />
-                    </div>
-                  </div>
-                </motion.div>
-              );
-            })}
-          </div>
+                  </motion.div>
+                );
+              })}
+            </div>
+          )}
         </section>
 
         {/* Provider Catalog Grid */}

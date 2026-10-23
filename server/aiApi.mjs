@@ -1,16 +1,19 @@
 import express from 'express';
 import archiver from 'archiver';
 import {
-  loadDb,
+  ensureVaultLoaded,
   saveDb,
-  findDbByApiKey,
+  findDbByApiKeyAsync,
   getUnsealedAccount,
   readAccountBinary,
   writeAccountBinary,
   selectTargetAccount,
   makeId,
 } from './store.mjs';
-import { downloadFileFromRemoteProvider } from './cloudAdapters.mjs';
+import {
+  downloadFileFromRemoteProvider,
+  uploadFileToRemoteProvider,
+} from './cloudAdapters.mjs';
 
 export function buildFolderPathMap(folders) {
   const byId = new Map(folders.map((f) => [f.id, f]));
@@ -83,36 +86,40 @@ export function createAiRouter() {
   const router = express.Router();
 
   // Middleware: Authenticate Cloudy AI API Key (Bearer cldy_sk_... or X-API-Key)
-  router.use((req, res, next) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', 'Authorization, X-API-Key, Content-Type');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    if (req.method === 'OPTIONS') return res.status(204).end();
+  router.use(async (req, res, next) => {
+    try {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Headers', 'Authorization, X-API-Key, Content-Type');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      if (req.method === 'OPTIONS') return res.status(204).end();
 
-    const auth = req.headers.authorization || '';
-    const headerKey = req.headers['x-api-key'] || req.query.api_key || '';
-    const token = auth.startsWith('Bearer ')
-      ? auth.slice(7).trim()
-      : String(headerKey).trim();
+      const auth = req.headers.authorization || '';
+      const headerKey = req.headers['x-api-key'] || req.query.api_key || '';
+      const token = auth.startsWith('Bearer ')
+        ? auth.slice(7).trim()
+        : String(headerKey).trim();
 
-    if (!token) {
-      return res.status(401).json({
-        ok: false,
-        error: 'Missing Cloudy AI API key. Provide header Authorization: Bearer cldy_sk_...',
-      });
+      if (!token) {
+        return res.status(401).json({
+          ok: false,
+          error: 'Missing Cloudy AI API key. Provide header Authorization: Bearer cldy_sk_...',
+        });
+      }
+
+      const found = await findDbByApiKeyAsync(token);
+      if (!found) {
+        return res.status(403).json({
+          ok: false,
+          error: 'Invalid, paused, or revoked Cloudy AI API key.',
+        });
+      }
+
+      req.cloudyDb = found.db;
+      req.aiKey = found.matched;
+      next();
+    } catch (err) {
+      res.status(500).json({ ok: false, error: String(err.message || err) });
     }
-
-    const found = findDbByApiKey(token);
-    if (!found) {
-      return res.status(403).json({
-        ok: false,
-        error: 'Invalid, paused, or revoked Cloudy AI API key.',
-      });
-    }
-
-    req.cloudyDb = found.db;
-    req.aiKey = found.matched;
-    next();
   });
 
   // GET /api/v1/ai/status
@@ -305,14 +312,24 @@ export function createAiRouter() {
   });
 
   // GET /api/v1/ai/files/:id/raw
-  router.get('/files/:id/raw', (req, res) => {
+  router.get('/files/:id/raw', async (req, res) => {
     const db = req.cloudyDb;
     const { files } = getAllowedScopeForKey(db, req.aiKey);
     const file = files.find((f) => f.id === req.params.id);
     if (!file) {
       return res.status(404).json({ ok: false, error: 'File not found or not permitted' });
     }
-    const buf = readAccountBinary(file.accountId, file.id, file.mirrorAccountId);
+    let buf = readAccountBinary(file.accountId, file.id, file.mirrorAccountId);
+    if (!buf && typeof file.textContent === 'string') {
+      buf = Buffer.from(file.textContent, 'utf8');
+    }
+    if (!buf && (file.remoteId || file.remotePath)) {
+      const acc = db.accounts.find((a) => a.id === file.accountId);
+      if (acc) {
+        buf = await downloadFileFromRemoteProvider(getUnsealedAccount(acc), file, null, null);
+        if (buf) writeAccountBinary(file.accountId, file.id, buf);
+      }
+    }
     if (!buf) {
       return res.status(404).json({ ok: false, error: 'File binary missing from storage mount' });
     }
@@ -323,66 +340,99 @@ export function createAiRouter() {
   });
 
   // POST /api/v1/ai/files (Create/save AI output note when scope === 'read_write')
-  router.post('/files', (req, res) => {
-    const db = req.cloudyDb;
-    if (req.aiKey.scope !== 'read_write') {
-      recordAiAudit(db, req.aiKey, 'POST', '/api/v1/ai/files', 403);
-      return res.status(403).json({
-        ok: false,
-        error: 'This API key is read-only. Create a key with read_write scope to allow AI file creation.',
+  router.post('/files', async (req, res) => {
+    try {
+      const db = req.cloudyDb;
+      if (req.aiKey.scope !== 'read_write') {
+        recordAiAudit(db, req.aiKey, 'POST', '/api/v1/ai/files', 403);
+        return res.status(403).json({
+          ok: false,
+          error: 'This API key is read-only. Create a key with read_write scope to allow AI file creation.',
+        });
+      }
+
+      const {
+        name,
+        content = '',
+        folderId = null,
+        mimeType = 'text/markdown',
+        tags = ['ai-generated'],
+      } = req.body || {};
+      if (!name || typeof name !== 'string') {
+        return res.status(400).json({ ok: false, error: 'Field "name" is required' });
+      }
+
+      const { allowedIds } = getAllowedScopeForKey(db, req.aiKey);
+      if (allowedIds && (!folderId || !allowedIds.has(folderId))) {
+        return res.status(403).json({
+          ok: false,
+          error: 'Target folderId is outside the permitted folders for this API key.',
+        });
+      }
+
+      const buf = Buffer.from(String(content), 'utf8');
+      const id = makeId('fil');
+
+      let accountId = 'offline_vault';
+      let providerId = 'offline_vault';
+      let providerName = 'Offline Vault';
+      let mirrorAccountId = null;
+      let remoteMeta = null;
+
+      if (db.accounts.length > 0) {
+        const { primary, mirror } = selectTargetAccount(db, buf.byteLength, mimeType);
+        remoteMeta = await uploadFileToRemoteProvider(
+          getUnsealedAccount(primary),
+          name.trim(),
+          buf,
+          mimeType,
+          null,
+          null
+        );
+        accountId = primary.id;
+        providerId = primary.providerId;
+        providerName = primary.providerName;
+        mirrorAccountId = mirror ? mirror.id : null;
+        if (mirror) writeAccountBinary(mirror.id, id, buf);
+      }
+
+      writeAccountBinary(accountId, id, buf);
+
+      const now = new Date().toISOString();
+      const newFile = {
+        id,
+        name: name.trim(),
+        folderId: folderId || null,
+        mimeType,
+        kind: 'note',
+        size: buf.byteLength,
+        accountId,
+        providerId,
+        providerName,
+        remoteId: remoteMeta?.remoteId || null,
+        remotePath: remoteMeta?.remotePath || null,
+        webUrl: remoteMeta?.webUrl || null,
+        mirrorAccountId,
+        offlinePinned: true,
+        starred: false,
+        trashed: false,
+        tags: Array.isArray(tags) ? tags : ['ai-generated'],
+        textContent: String(content),
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      db.files.unshift(newFile);
+      saveDb(db.vaultId);
+      recordAiAudit(db, req.aiKey, 'POST', '/api/v1/ai/files', 201);
+
+      res.status(201).json({
+        ok: true,
+        file: newFile,
       });
+    } catch (err) {
+      res.status(400).json({ ok: false, error: String(err.message || err) });
     }
-
-    const { name, content = '', folderId = null, mimeType = 'text/markdown', tags = ['ai-generated'] } = req.body || {};
-    if (!name || typeof name !== 'string') {
-      return res.status(400).json({ ok: false, error: 'Field "name" is required' });
-    }
-
-    const { allowedIds } = getAllowedScopeForKey(db, req.aiKey);
-    if (allowedIds && (!folderId || !allowedIds.has(folderId))) {
-      return res.status(403).json({
-        ok: false,
-        error: 'Target folderId is outside the permitted folders for this API key.',
-      });
-    }
-
-    const buf = Buffer.from(String(content), 'utf8');
-    const { primary, mirror } = selectTargetAccount(db, buf.byteLength, mimeType);
-    const id = makeId('fil');
-    writeAccountBinary(primary.id, id, buf);
-    if (mirror) {
-      writeAccountBinary(mirror.id, id, buf);
-    }
-
-    const now = new Date().toISOString();
-    const newFile = {
-      id,
-      name: name.trim(),
-      folderId: folderId || null,
-      mimeType,
-      kind: 'note',
-      size: buf.byteLength,
-      accountId: primary.id,
-      providerId: primary.providerId,
-      providerName: primary.providerName,
-      mirrorAccountId: mirror ? mirror.id : null,
-      offlinePinned: true,
-      starred: false,
-      trashed: false,
-      tags: Array.isArray(tags) ? tags : ['ai-generated'],
-      textContent: String(content),
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    db.files.unshift(newFile);
-    saveDb(db.vaultId);
-    recordAiAudit(db, req.aiKey, 'POST', '/api/v1/ai/files', 201);
-
-    res.status(201).json({
-      ok: true,
-      file: newFile,
-    });
   });
 
   return router;
@@ -411,9 +461,9 @@ export function isLikelyTextMime(mime = '', filename = '') {
  * so local offline AI models (Ollama, llama.cpp, LM Studio on PC or Android Termux)
  * can access all synced files & folders completely offline on 127.0.0.1:8765!
  */
-export function streamOfflineAiBundleZip(req, res) {
+export async function streamOfflineAiBundleZip(req, res) {
   const vaultId = req.query.vaultId || req.headers['x-cloudy-vault-id'] || 'default';
-  const db = loadDb(vaultId);
+  const db = await ensureVaultLoaded(vaultId);
   const archive = archiver('zip', { zlib: { level: 9 } });
 
   res.setHeader('Content-Type', 'application/zip');
@@ -426,7 +476,10 @@ export function streamOfflineAiBundleZip(req, res) {
 
   const exportedFilesMeta = [];
   for (const f of offlineFiles) {
-    const buf = readAccountBinary(f.accountId, f.id, f.mirrorAccountId);
+    let buf = readAccountBinary(f.accountId, f.id, f.mirrorAccountId);
+    if (!buf && typeof f.textContent === 'string') {
+      buf = Buffer.from(f.textContent, 'utf8');
+    }
     const relBlobPath = `vault/blobs/${f.id}_${f.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
     if (buf) {
       archive.append(buf, { name: relBlobPath });

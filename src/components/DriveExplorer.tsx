@@ -41,6 +41,7 @@ interface DriveExplorerProps {
   onTrashOrDeleteFile: (file: FileItem, permanent?: boolean) => Promise<void>;
   onRestoreFile: (file: FileItem) => Promise<void>;
   onTrashOrDeleteFolder: (folder: FolderItem, permanent?: boolean) => Promise<void>;
+  onRestoreFolder: (folder: FolderItem) => Promise<void>;
 }
 
 function getFileVisual(mimeType: string, name: string) {
@@ -80,6 +81,7 @@ export const DriveExplorer: React.FC<DriveExplorerProps> = ({
   onTrashOrDeleteFile,
   onRestoreFile,
   onTrashOrDeleteFolder,
+  onRestoreFolder,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [viewFilter, setViewFilter] = useState<'active' | 'trash'>('active');
@@ -371,16 +373,33 @@ export const DriveExplorer: React.FC<DriveExplorerProps> = ({
                         </div>
                       </div>
 
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onTrashOrDeleteFolder(folder, viewFilter === 'trash');
-                        }}
-                        className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg text-ink-muted hover:text-red-400 hover:bg-canvas/60 transition"
-                        title={viewFilter === 'trash' ? 'Delete forever' : 'Move to trash'}
+                      <div
+                        className="flex items-center gap-1 shrink-0"
+                        onClick={(e) => e.stopPropagation()}
                       >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                        {viewFilter === 'trash' && (
+                          <button
+                            onClick={() => onRestoreFolder(folder)}
+                            className="p-1.5 rounded-lg text-ink-secondary hover:text-[#10A37F] hover:bg-canvas/60 transition"
+                            title="Restore carpeta"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                        <button
+                          onClick={() =>
+                            onTrashOrDeleteFolder(folder, viewFilter === 'trash')
+                          }
+                          className={`${
+                            viewFilter === 'trash'
+                              ? 'opacity-100'
+                              : 'opacity-0 group-hover:opacity-100'
+                          } p-1.5 rounded-lg text-ink-muted hover:text-red-400 hover:bg-canvas/60 transition`}
+                          title={viewFilter === 'trash' ? 'Delete forever' : 'Move to trash'}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </motion.div>
                   );
                 })}
