@@ -58,7 +58,10 @@ export interface SyncVaultResult {
 
 let inFlightOnlineSync: Promise<SyncVaultResult> | null = null;
 
-export async function syncVaultState(forceOfflineMode: boolean): Promise<SyncVaultResult> {
+export async function syncVaultState(
+  forceOfflineMode: boolean,
+  forceFresh = false
+): Promise<SyncVaultResult> {
   if (forceOfflineMode || (typeof navigator !== 'undefined' && !navigator.onLine)) {
     const offlineState = await loadOfflineSnapshot();
     const queue = await getOfflineQueue();
@@ -73,19 +76,22 @@ export async function syncVaultState(forceOfflineMode: boolean): Promise<SyncVau
     }
   }
 
-  // Deduplicate concurrent online sync calls so background auto-sync never double-replays queue items
+  // Deduplicate concurrent online sync calls; if forceFresh is requested while one is running, wait then fetch fresh
   if (inFlightOnlineSync) {
-    return inFlightOnlineSync;
+    if (!forceFresh) {
+      return inFlightOnlineSync;
+    }
+    await inFlightOnlineSync.catch(() => {});
   }
 
-  inFlightOnlineSync = runOnlineSyncCycle().finally(() => {
+  inFlightOnlineSync = runOnlineSyncCycle(forceFresh).finally(() => {
     inFlightOnlineSync = null;
   });
 
   return inFlightOnlineSync;
 }
 
-async function runOnlineSyncCycle(): Promise<SyncVaultResult> {
+async function runOnlineSyncCycle(forceFresh = false): Promise<SyncVaultResult> {
   try {
     const [localFilesBefore, localFoldersBefore] = await Promise.all([
       getAllStoreItems<FileItem>('files').catch(() => []),
@@ -168,7 +174,9 @@ async function runOnlineSyncCycle(): Promise<SyncVaultResult> {
       }
     }
 
-    const res = await apiFetch('/api/vault/state');
+    const res = await apiFetch(
+      forceFresh ? '/api/vault/state?fresh=1' : '/api/vault/state'
+    );
     if (res.status === 401) {
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('cloudy:auth-required'));

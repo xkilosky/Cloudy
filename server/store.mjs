@@ -288,7 +288,7 @@ export async function flushPendingSaves() {
   await Promise.allSettled(tasks);
 }
 
-export async function ensureVaultLoaded(rawVaultId = 'default') {
+export async function ensureVaultLoaded(rawVaultId = 'default', { forceFresh = false } = {}) {
   const vaultId = normalizeVaultId(rawVaultId);
   const inFlightSave = pendingRemoteSaves.get(vaultId);
   if (inFlightSave) {
@@ -298,7 +298,7 @@ export async function ensureVaultLoaded(rawVaultId = 'default') {
   const lastHydratedAt = hydratedAtMap.get(vaultId) || 0;
   const shouldRefreshRemote =
     Boolean(process.env.CLOUDY_SUPABASE_URL && process.env.CLOUDY_SUPABASE_SERVICE_KEY) &&
-    Date.now() - lastHydratedAt >= REMOTE_REFRESH_TTL_MS;
+    (forceFresh || Date.now() - lastHydratedAt >= REMOTE_REFRESH_TTL_MS);
 
   if (shouldRefreshRemote) {
     const remoteState = await fetchRemoteVaultState(vaultId);

@@ -276,9 +276,10 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
             {vault.providersCatalog.map((provider, idx) => {
-              const count = vault.accounts.filter(
+              const connectedForProvider = vault.accounts.filter(
                 (a) => a.providerId === provider.id
-              ).length;
+              );
+              const count = connectedForProvider.length;
 
               return (
                 <motion.div
@@ -287,15 +288,19 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.24, delay: Math.min(idx * 0.03, 0.24) }}
                   whileHover={{ y: -2 }}
-                  className="rounded-2xl bg-surface hover:bg-elevated/60 border border-line hover:border-line-strong p-5 flex flex-col justify-between gap-4 shadow-card transition-colors"
+                  className={`rounded-2xl bg-surface hover:bg-elevated/60 border p-5 flex flex-col justify-between gap-4 shadow-card transition-colors ${
+                    count > 0
+                      ? 'border-[#10A37F]/40 hover:border-[#10A37F]/65'
+                      : 'border-line hover:border-line-strong'
+                  }`}
                 >
                   <div className="space-y-2">
                     <div className="flex items-center justify-between gap-2">
                       <h3 className="text-[14px] font-semibold text-ink flex items-center gap-2">
                         {provider.name}
                         {count > 0 && (
-                          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-[#10A37F]/15 text-[#10A37F]">
-                            {count}
+                          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-[#10A37F]/15 border border-[#10A37F]/30 text-[#10A37F]">
+                            ✓ {count === 1 ? 'Connected' : `${count} Connected`}
                           </span>
                         )}
                       </h3>
@@ -306,6 +311,18 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
                     <p className="text-xs text-ink-secondary leading-relaxed">
                       {provider.description}
                     </p>
+                    {count > 0 && (
+                      <div className="pt-1 space-y-1">
+                        {connectedForProvider.map((acc) => (
+                          <div
+                            key={acc.id}
+                            className="text-[11px] text-[#6EE7B7] bg-[#10A37F]/10 border border-[#10A37F]/20 rounded-xl px-2.5 py-1 truncate"
+                          >
+                            {acc.accountLabel} · {acc.email}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   <div className="flex items-center justify-between pt-3 border-t border-line">
@@ -329,10 +346,14 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
                       whileTap={{ scale: 0.96 }}
                       disabled={isOffline}
                       onClick={() => setSelectedProvider(provider)}
-                      className="px-4 py-1.5 rounded-full bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center gap-1 shadow-glow transition disabled:opacity-40"
+                      className={`px-4 py-1.5 rounded-full text-xs font-semibold inline-flex items-center gap-1 transition disabled:opacity-40 ${
+                        count > 0
+                          ? 'bg-elevated hover:bg-canvas border border-line-strong text-ink'
+                          : 'bg-accent hover:bg-accent-hover text-accent-fg shadow-glow'
+                      }`}
                     >
                       <Plus className="w-3.5 h-3.5" />
-                      Connect
+                      {count > 0 ? 'Add Another' : 'Connect'}
                     </motion.button>
                   </div>
                 </motion.div>
@@ -344,6 +365,12 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
 
       <ConnectProviderModal
         provider={selectedProvider}
+        existingAccounts={
+          selectedProvider
+            ? vault.accounts.filter((a) => a.providerId === selectedProvider.id)
+            : []
+        }
+        onSyncExistingAccount={onSyncAccount}
         onClose={() => setSelectedProvider(null)}
         onConnectCredentials={onConnectCredentials}
         onConnectedRefresh={onConnectedRefresh}

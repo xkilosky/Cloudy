@@ -121,9 +121,16 @@ app.use('/api', async (req, res, next) => {
   }
 
   const targetVaultId = reqVaultId(req);
+  const forceFreshVault =
+    req.query.fresh === '1' ||
+    req.headers['x-cloudy-force-fresh'] === '1' ||
+    req.path.startsWith('/device-auth/') ||
+    req.path.startsWith('/nextcloud/') ||
+    req.path.startsWith('/accounts/') ||
+    req.path.startsWith('/oauth/');
   let db = null;
   try {
-    db = await ensureVaultLoaded(targetVaultId);
+    db = await ensureVaultLoaded(targetVaultId, { forceFresh: forceFreshVault });
   } catch {
     db = loadDb(targetVaultId);
   }
@@ -656,18 +663,23 @@ app.get('/api/oauth/callback', async (req, res) => {
     }
 
     const targetVid = peekOAuthStateVaultId(String(state || ''));
-    const preDb = await ensureVaultLoaded(targetVid);
+    const preDb = await ensureVaultLoaded(targetVid, { forceFresh: true });
 
     const tokenBundle = await exchangeOAuthCode(
       String(state || ''),
       String(code || ''),
       async (pid, vid) => {
-        const cfgDb = vid && vid !== preDb.vaultId ? await ensureVaultLoaded(vid) : preDb;
+        const cfgDb =
+          vid && vid !== preDb.vaultId
+            ? await ensureVaultLoaded(vid, { forceFresh: true })
+            : preDb;
         return getOAuthConfigForProvider(cfgDb, pid);
       }
     );
 
-    const db = await ensureVaultLoaded(tokenBundle.vaultId || targetVid || 'default');
+    const db = await ensureVaultLoaded(tokenBundle.vaultId || targetVid || 'default', {
+      forceFresh: true,
+    });
     const verified = await verifyAndInspectProvider(tokenBundle.providerId, tokenBundle);
     const account = addVerifiedProviderAccount(db, {
       providerId: tokenBundle.providerId,
@@ -683,27 +695,68 @@ app.get('/api/oauth/callback', async (req, res) => {
     await flushPendingSaves();
 
     const safeJson = JSON.stringify(sanitizeAccount(account));
+    const returnHref = `/?tab=providers&connected=${encodeURIComponent(account.accountLabel)}`;
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(`<!doctype html><html><body style="background:#171920;color:#ECEEF2;font-family:Inter,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
       <script>
-        if (window.opener) {
-          window.opener.postMessage({ type: 'CLOUDY_OAUTH_SUCCESS', account: ${safeJson} }, '*');
-          window.close();
-        } else {
-          window.location.href = '/?tab=providers';
-        }
+        (function() {
+          var acc = ${safeJson};
+          try {
+            if (typeof BroadcastChannel !== 'undefined') {
+              var bc = new BroadcastChannel('cloudy_oauth_channel');
+              bc.postMessage({ type: 'CLOUDY_OAUTH_SUCCESS', account: acc });
+              setTimeout(function() { try { bc.close(); } catch (e) {} }, 300);
+            }
+          } catch (e) {}
+          try {
+            localStorage.setItem('cloudy_oauth_event', JSON.stringify({ ts: Date.now(), account: acc }));
+          } catch (e) {}
+          try {
+            if (window.opener && !window.opener.closed) {
+              window.opener.postMessage({ type: 'CLOUDY_OAUTH_SUCCESS', account: acc }, '*');
+            }
+          } catch (e) {}
+          try { window.close(); } catch (e) {}
+          setTimeout(function() {
+            if (!window.closed) {
+              window.location.replace(${JSON.stringify(returnHref)});
+            }
+          }, 350);
+        })();
       </script>
-      <div style="text-align:center;">
-        <p style="color:#10A37F;font-weight:600;">✓ Connected ${account.accountLabel}</p>
-        <p style="color:#9BA1AE;font-size:13px;">Returning to Cloudy...</p>
+      <div style="text-align:center;padding:24px;">
+        <p style="color:#10A37F;font-weight:600;font-size:16px;margin-bottom:6px;">✓ Connected ${account.accountLabel}</p>
+        <p style="color:#9BA1AE;font-size:13px;margin-bottom:16px;">Returning to Cloudy automatically...</p>
+        <a href="${returnHref}" style="display:inline-block;padding:10px 20px;background:#4D6BFE;color:#fff;text-decoration:none;border-radius:999px;font-size:13px;font-weight:600;">Continue to Cloudy</a>
       </div>
     </body></html>`);
   } catch (err) {
     const rawMsg = String(err.message || err);
     const msg = rawMsg.replace(/</g, '&lt;');
+    const safeErrJson = JSON.stringify(rawMsg);
     const isAccessDenied = rawMsg.includes('access_denied');
     res.status(400).setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(`<!doctype html><html><body style="background:#171920;color:#ECEEF2;font-family:Inter,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;padding:24px;margin:0;">
+      <script>
+        (function() {
+          var errMsg = ${safeErrJson};
+          try {
+            if (typeof BroadcastChannel !== 'undefined') {
+              var bc = new BroadcastChannel('cloudy_oauth_channel');
+              bc.postMessage({ type: 'CLOUDY_OAUTH_ERROR', error: errMsg });
+              setTimeout(function() { try { bc.close(); } catch (e) {} }, 300);
+            }
+          } catch (e) {}
+          try {
+            localStorage.setItem('cloudy_oauth_event', JSON.stringify({ ts: Date.now(), error: errMsg }));
+          } catch (e) {}
+          try {
+            if (window.opener && !window.opener.closed) {
+              window.opener.postMessage({ type: 'CLOUDY_OAUTH_ERROR', error: errMsg }, '*');
+            }
+          } catch (e) {}
+        })();
+      </script>
       <div style="max-width:480px;border:1px solid #303442;padding:28px;border-radius:24px;background:#20232C;">
         <h3 style="color:#f87171;margin-top:0;">OAuth Access Blocked (${msg})</h3>
         ${
@@ -756,25 +809,82 @@ app.post('/api/accounts/connect', async (req, res) => {
   }
 });
 
+const inFlightAuthPolls = new Map();
+
+function prunePendingAuthFlows(db) {
+  if (!db.pendingAuthFlows || typeof db.pendingAuthFlows !== 'object') {
+    db.pendingAuthFlows = {};
+    return;
+  }
+  const cutoff = Date.now() - 25 * 60 * 1000;
+  for (const [k, v] of Object.entries(db.pendingAuthFlows)) {
+    if (!v || Number(v.startedAt || 0) < cutoff) {
+      delete db.pendingAuthFlows[k];
+    }
+  }
+}
+
+function hashFlowSecret(raw) {
+  return crypto.createHash('sha256').update(String(raw || '')).digest('hex').slice(0, 24);
+}
+
 // --- Zero-Console Nextcloud 1-Click Browser Login Flow v2 ---
 app.post('/api/nextcloud/login-init', async (req, res) => {
   try {
+    const db = await ensureVaultLoaded(reqVaultId(req), { forceFresh: true });
     const { serverUrl } = req.body || {};
     if (!serverUrl) return res.status(400).json({ ok: false, error: 'serverUrl is required' });
     const flow = await initNextcloudLoginFlow(serverUrl);
-    res.json({ ok: true, ...flow });
+    prunePendingAuthFlows(db);
+    const flowKey = `nc_${hashFlowSecret(flow.pollToken)}`;
+    db.pendingAuthFlows[flowKey] = {
+      providerId: 'nextcloud',
+      status: 'pending',
+      startedAt: Date.now(),
+    };
+    await saveDb(db.vaultId);
+    res.json({ ok: true, flowKey, ...flow });
   } catch (err) {
     res.status(400).json({ ok: false, error: String(err.message || err) });
   }
 });
 
 app.post('/api/nextcloud/login-poll', async (req, res) => {
-  try {
-    const db = loadDb(reqVaultId(req));
-    const { pollEndpoint, pollToken } = req.body || {};
+  const { pollEndpoint, pollToken } = req.body || {};
+  if (!pollEndpoint || !pollToken) {
+    return res.status(400).json({ ok: false, error: 'pollEndpoint and pollToken are required' });
+  }
+  const flowKey = `nc_${hashFlowSecret(pollToken)}`;
+  if (inFlightAuthPolls.has(flowKey)) {
+    try {
+      const shared = await inFlightAuthPolls.get(flowKey);
+      return res.json(shared);
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: String(err.message || err) });
+    }
+  }
+
+  const task = (async () => {
+    const db = await ensureVaultLoaded(reqVaultId(req), { forceFresh: true });
+    prunePendingAuthFlows(db);
+    const tracked = db.pendingAuthFlows[flowKey];
+    if (tracked?.status === 'connected') {
+      const existingAcc =
+        db.accounts.find((a) => a.id === tracked.accountId) ||
+        db.accounts.filter((a) => a.providerId === 'nextcloud').slice(-1)[0];
+      if (existingAcc) {
+        return {
+          ok: true,
+          pending: false,
+          account: sanitizeAccount(existingAcc),
+          importedFilesCount: tracked.importedFilesCount || 0,
+        };
+      }
+    }
+
     const result = await pollNextcloudLoginFlow(pollEndpoint, pollToken);
     if (result.pending) {
-      return res.json({ ok: true, pending: true });
+      return { ok: true, pending: true };
     }
     const verified = await verifyAndInspectProvider('nextcloud', result.credentials);
     const account = addVerifiedProviderAccount(db, {
@@ -786,57 +896,197 @@ app.post('/api/nextcloud/login-poll', async (req, res) => {
       credentials: verified.credentials,
       connectionMode: 'login_flow_v2',
     });
+    db.pendingAuthFlows[flowKey] = {
+      ...(tracked || {}),
+      providerId: 'nextcloud',
+      status: 'connected',
+      accountId: account.id,
+      startedAt: tracked?.startedAt || Date.now(),
+      completedAt: Date.now(),
+    };
+    await saveDb(db.vaultId);
     const importedFilesCount = await importRemoteFilesIntoVault(db, account);
-    res.json({
+    db.pendingAuthFlows[flowKey].importedFilesCount = importedFilesCount;
+    await saveDb(db.vaultId);
+    return {
       ok: true,
       pending: false,
       account: sanitizeAccount(account),
       importedFilesCount,
-    });
+    };
+  })();
+
+  inFlightAuthPolls.set(flowKey, task);
+  try {
+    const payload = await task;
+    return res.json(payload);
   } catch (err) {
-    res.status(400).json({ ok: false, error: String(err.message || err) });
+    return res.status(400).json({ ok: false, error: String(err.message || err) });
+  } finally {
+    inFlightAuthPolls.delete(flowKey);
   }
 });
 
 // --- 1-Click OAuth Device Code Flow (GitHub & Microsoft OneDrive — Zero Copy-Paste, Zero App Setup!) ---
 app.post('/api/device-auth/:providerId/start', async (req, res) => {
   try {
+    const db = await ensureVaultLoaded(reqVaultId(req), { forceFresh: true });
     const { providerId } = req.params;
     const flow = await startPublicDeviceFlow(providerId);
-    res.json({ ok: true, ...flow });
+    const safeInterval = Math.max(5, Number(flow.interval || 5));
+    prunePendingAuthFlows(db);
+    const flowKey = `df_${hashFlowSecret(flow.deviceCode)}`;
+    db.pendingAuthFlows[flowKey] = {
+      providerId,
+      interval: safeInterval,
+      nextPollAfter: Date.now() + 2500,
+      status: 'pending',
+      startedAt: Date.now(),
+    };
+    await saveDb(db.vaultId);
+    res.json({ ok: true, flowKey, ...flow, interval: safeInterval });
   } catch (err) {
     res.status(400).json({ ok: false, error: String(err.message || err) });
   }
 });
 
 app.post('/api/device-auth/:providerId/poll', async (req, res) => {
-  try {
-    const db = loadDb(reqVaultId(req));
-    const { providerId } = req.params;
-    const { deviceCode } = req.body || {};
-    const result = await pollPublicDeviceFlow(providerId, deviceCode);
-    if (result.pending) {
-      return res.json({ ok: true, pending: true });
+  const { providerId } = req.params;
+  const { deviceCode } = req.body || {};
+  if (!deviceCode) {
+    return res.status(400).json({ ok: false, error: 'deviceCode is required' });
+  }
+
+  const flowKey = `df_${hashFlowSecret(deviceCode)}`;
+  if (inFlightAuthPolls.has(flowKey)) {
+    try {
+      const shared = await inFlightAuthPolls.get(flowKey);
+      return res.json(shared);
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: String(err.message || err) });
     }
-    const verified = await verifyAndInspectProvider(providerId, result.credentials);
-    const account = addVerifiedProviderAccount(db, {
-      providerId,
-      email: verified.email,
-      accountLabel: verified.accountLabel,
-      quotaBytes: verified.quotaBytes,
-      usedBytes: verified.usedBytes,
-      credentials: verified.credentials,
-      connectionMode: 'device_flow',
-    });
-    const importedFilesCount = await importRemoteFilesIntoVault(db, account);
-    res.json({
-      ok: true,
-      pending: false,
-      account: sanitizeAccount(account),
-      importedFilesCount,
-    });
+  }
+
+  const task = (async () => {
+    const db = await ensureVaultLoaded(reqVaultId(req), { forceFresh: true });
+    prunePendingAuthFlows(db);
+    const tracked = db.pendingAuthFlows[flowKey];
+
+    // 1. If a previous background poll ALREADY redeemed & connected this flow (common on Android Chrome tab switch!), return immediately!
+    if (tracked?.status === 'connected') {
+      const existingAcc =
+        db.accounts.find((a) => a.id === tracked.accountId) ||
+        db.accounts.filter((a) => a.providerId === providerId).slice(-1)[0];
+      if (existingAcc) {
+        return {
+          ok: true,
+          pending: false,
+          account: sanitizeAccount(existingAcc),
+          importedFilesCount: tracked.importedFilesCount || 0,
+        };
+      }
+    }
+
+    // 2. Respect upstream RFC 8628 minimum polling interval so GitHub/Microsoft never permanently penalize with `slow_down`!
+    if (tracked?.nextPollAfter && Date.now() < tracked.nextPollAfter - 250) {
+      const waitMs = Math.max(1200, tracked.nextPollAfter - Date.now());
+      return {
+        ok: true,
+        pending: true,
+        interval: tracked.interval || 5,
+        retryAfterMs: waitMs,
+      };
+    }
+
+    try {
+      const result = await pollPublicDeviceFlow(providerId, deviceCode);
+      if (result.pending) {
+        const prevInterval = Number(tracked?.interval || 5);
+        const nextInterval = result.slowDown
+          ? Math.max(prevInterval + 5, Number(result.interval || 10))
+          : prevInterval;
+        const retryAfterMs = (nextInterval + 1) * 1000;
+        db.pendingAuthFlows[flowKey] = {
+          ...(tracked || { providerId, startedAt: Date.now() }),
+          status: 'pending',
+          interval: nextInterval,
+          nextPollAfter: Date.now() + retryAfterMs,
+        };
+        await saveDb(db.vaultId);
+        return {
+          ok: true,
+          pending: true,
+          interval: nextInterval,
+          retryAfterMs,
+        };
+      }
+
+      const verified = await verifyAndInspectProvider(providerId, result.credentials);
+      const account = addVerifiedProviderAccount(db, {
+        providerId,
+        email: verified.email,
+        accountLabel: verified.accountLabel,
+        quotaBytes: verified.quotaBytes,
+        usedBytes: verified.usedBytes,
+        credentials: verified.credentials,
+        connectionMode: 'device_flow',
+      });
+
+      // Persist connected flow state immediately BEFORE slow file listing so concurrent/resumed mobile tabs see it right away!
+      db.pendingAuthFlows[flowKey] = {
+        ...(tracked || { providerId, startedAt: Date.now() }),
+        status: 'connected',
+        accountId: account.id,
+        completedAt: Date.now(),
+      };
+      await saveDb(db.vaultId);
+
+      const importedFilesCount = await importRemoteFilesIntoVault(db, account);
+      db.pendingAuthFlows[flowKey].importedFilesCount = importedFilesCount;
+      await saveDb(db.vaultId);
+
+      return {
+        ok: true,
+        pending: false,
+        account: sanitizeAccount(account),
+        importedFilesCount,
+      };
+    } catch (err) {
+      // If another serverless instance redeemed `deviceCode` moments ago, reload fresh state from Supabase and recover the connected account!
+      if (err?.code === 'DEVICE_CODE_CONSUMED') {
+        await new Promise((r) => setTimeout(r, 900));
+        const freshDb = await ensureVaultLoaded(reqVaultId(req), { forceFresh: true });
+        const freshTracked = freshDb.pendingAuthFlows?.[flowKey];
+        const recoveredAcc =
+          (freshTracked?.accountId &&
+            freshDb.accounts.find((a) => a.id === freshTracked.accountId)) ||
+          freshDb.accounts.find(
+            (a) =>
+              a.providerId === providerId &&
+              a.lastSyncedAt &&
+              Date.now() - new Date(a.lastSyncedAt).getTime() < 120_000
+          );
+        if (recoveredAcc) {
+          return {
+            ok: true,
+            pending: false,
+            account: sanitizeAccount(recoveredAcc),
+            importedFilesCount: freshTracked?.importedFilesCount || 0,
+          };
+        }
+      }
+      throw err;
+    }
+  })();
+
+  inFlightAuthPolls.set(flowKey, task);
+  try {
+    const payload = await task;
+    return res.json(payload);
   } catch (err) {
-    res.status(400).json({ ok: false, error: String(err.message || err) });
+    return res.status(400).json({ ok: false, error: String(err.message || err) });
+  } finally {
+    inFlightAuthPolls.delete(flowKey);
   }
 });
 

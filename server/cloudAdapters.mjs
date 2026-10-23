@@ -1653,10 +1653,23 @@ export async function pollPublicDeviceFlow(providerId, deviceCode) {
 
   const data = await res.json();
   if (data.error) {
-    if (data.error === 'authorization_pending' || data.error === 'slow_down') {
+    if (data.error === 'authorization_pending') {
       return { pending: true };
     }
-    throw new Error(data.error_description || data.error);
+    if (data.error === 'slow_down') {
+      return {
+        pending: true,
+        slowDown: true,
+        interval: Number(data.interval || 10),
+      };
+    }
+    const desc = String(data.error_description || data.error || '');
+    const isCodeConsumed =
+      data.error === 'bad_verification_code' ||
+      /already redeemed|already been used|AADSTS70000|invalid_grant/i.test(desc);
+    const err = new Error(desc || data.error);
+    err.code = isCodeConsumed ? 'DEVICE_CODE_CONSUMED' : data.error;
+    throw err;
   }
 
   return {

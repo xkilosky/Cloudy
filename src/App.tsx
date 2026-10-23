@@ -149,7 +149,11 @@ export function App() {
   }, []);
 
   const refreshVault = useCallback(
-    async (forceOfflineOverride?: boolean, silentBackground = false) => {
+    async (
+      forceOfflineOverride?: boolean,
+      silentBackground = false,
+      forceFresh = false
+    ) => {
       try {
         const useOffline =
           forceOfflineOverride !== undefined
@@ -158,7 +162,7 @@ export function App() {
         if (!useOffline && !silentBackground) {
           setIsSyncing(true);
         }
-        const res = await syncVaultState(useOffline);
+        const res = await syncVaultState(useOffline, forceFresh);
         setVault(res.state);
         setIsOffline(res.isOffline);
         setPendingSyncCount(res.pendingQueueCount);
@@ -174,7 +178,7 @@ export function App() {
           if (guestMode) {
             resetToFreshGuestVault();
             await clearAllOfflineStores().catch(() => {});
-            const retry = await syncVaultState(false).catch(() => null);
+            const retry = await syncVaultState(false, true).catch(() => null);
             if (retry) {
               setVault(retry.state);
               return;
@@ -196,13 +200,27 @@ export function App() {
 
   useEffect(() => {
     if (!canLoadWorkspace) return;
-    refreshVault();
-  }, [canLoadWorkspace, refreshVault, authUser?.id]);
+    const params = new URLSearchParams(window.location.search);
+    const connectedLabel = params.get('connected');
+    if (connectedLabel) {
+      refreshVault(false, false, true);
+      showToast(`Connected ${connectedLabel}`);
+      params.delete('connected');
+      const qs = params.toString();
+      window.history.replaceState(
+        {},
+        '',
+        `${window.location.pathname}${qs ? `?${qs}` : ''}`
+      );
+      return;
+    }
+    refreshVault(undefined, false, true);
+  }, [canLoadWorkspace, refreshVault, authUser?.id, showToast]);
 
   useEffect(() => {
     const handleOnline = () => {
       if (!simulatedOffline && canLoadWorkspace) {
-        refreshVault(false);
+        refreshVault(false, false, true);
         showToast('Internet connected — Live Auto-Sync active');
       }
     };
@@ -219,15 +237,26 @@ export function App() {
         navigator.onLine &&
         document.visibilityState === 'visible'
       ) {
-        refreshVault(false, true);
+        refreshVault(false, true, true);
       }
+    };
+    const handleOAuthSuccessPayload = (accountLabel?: string) => {
+      refreshVault(false, false, true);
+      showToast(`Connected ${accountLabel || 'Cloud Account'}`);
     };
     const handleMessage = (event: MessageEvent) => {
       if (event.data?.type === 'CLOUDY_OAUTH_SUCCESS') {
-        refreshVault(false);
-        showToast(
-          `Connected ${event.data.account?.accountLabel || 'Cloud Account'}`
-        );
+        handleOAuthSuccessPayload(event.data.account?.accountLabel);
+      }
+    };
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key === 'cloudy_oauth_event' && event.newValue) {
+        try {
+          const parsed = JSON.parse(event.newValue);
+          handleOAuthSuccessPayload(parsed?.account?.accountLabel);
+        } catch {
+          handleOAuthSuccessPayload();
+        }
       }
     };
     const handleBeforeInstall = (e: Event) => {
@@ -235,11 +264,26 @@ export function App() {
       setDeferredPrompt(e as BeforeInstallPromptEvent);
     };
 
+    let bc: BroadcastChannel | null = null;
+    try {
+      if (typeof BroadcastChannel !== 'undefined') {
+        bc = new BroadcastChannel('cloudy_oauth_channel');
+        bc.onmessage = (ev) => {
+          if (ev.data?.type === 'CLOUDY_OAUTH_SUCCESS') {
+            handleOAuthSuccessPayload(ev.data.account?.accountLabel);
+          }
+        };
+      }
+    } catch {
+      // BroadcastChannel unsupported
+    }
+
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
     window.addEventListener('focus', handleFocusOrVisible);
     document.addEventListener('visibilitychange', handleFocusOrVisible);
     window.addEventListener('message', handleMessage);
+    window.addEventListener('storage', handleStorage);
     window.addEventListener('beforeinstallprompt', handleBeforeInstall);
 
     if ('serviceWorker' in navigator) {
@@ -247,11 +291,19 @@ export function App() {
     }
 
     return () => {
+      if (bc) {
+        try {
+          bc.close();
+        } catch {
+          // ignore
+        }
+      }
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
       window.removeEventListener('focus', handleFocusOrVisible);
       document.removeEventListener('visibilitychange', handleFocusOrVisible);
       window.removeEventListener('message', handleMessage);
+      window.removeEventListener('storage', handleStorage);
       window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
     };
   }, [canLoadWorkspace, refreshVault, simulatedOffline, showToast]);
@@ -978,7 +1030,7 @@ export function App() {
           isSyncing={isSyncing}
           onToggleOffline={handleToggleOffline}
           onForceSync={async () => {
-            await refreshVault(false);
+            await refreshVault(false, false, true);
             showToast('Vault synced live');
           }}
           pendingSyncCount={pendingSyncCount}
@@ -1008,7 +1060,7 @@ export function App() {
                 onDisconnectAccount={handleDisconnectAccount}
                 onUpdateAllocationRule={handleUpdateRule}
                 onConnectedRefresh={async (label) => {
-                  await refreshVault();
+                  await refreshVault(false, false, true);
                   showToast(`Connected ${label || 'Cloud Storage'}`);
                 }}
               />
