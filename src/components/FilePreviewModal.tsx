@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Download, Save, ExternalLink } from 'lucide-react';
+import { X, Download, Save, ExternalLink, Folder, Cloud } from 'lucide-react';
 import type { FileItem, StorageAccount, FolderItem } from '../types';
 import { formatBytes, isTextEditable } from '../lib/format';
 import { getOfflineBlob } from '../lib/offlineDb';
@@ -98,72 +98,91 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           onClick={onClose}
-          className="fixed inset-0 z-50 bg-black/70 backdrop-blur-md flex items-center justify-center p-4"
+          className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-end sm:items-center justify-center p-0 sm:p-4"
         >
           <motion.div
-            initial={{ opacity: 0, scale: 0.96, y: 12 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.96, y: 10 }}
-            transition={{ type: 'spring', stiffness: 400, damping: 32 }}
+            initial={{ opacity: 0, y: 24, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 20, scale: 0.98 }}
+            transition={{ type: 'spring', stiffness: 420, damping: 34 }}
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-4xl max-h-[90vh] rounded-3xl bg-surface border border-line-strong flex flex-col overflow-hidden shadow-float"
+            className="w-full sm:max-w-4xl h-[92dvh] sm:h-[85dvh] sm:max-h-[90dvh] rounded-t-3xl sm:rounded-3xl bg-surface border-t sm:border border-line-strong flex flex-col overflow-hidden shadow-float pb-safe"
           >
-            {/* Header */}
-            <div className="px-6 py-4 border-b border-line flex items-center justify-between gap-3">
-              <div className="min-w-0">
-                <h3 className="text-[15px] font-semibold text-ink truncate">
-                  {file.name}
-                </h3>
-                <p className="text-xs text-ink-muted mt-0.5 font-mono">
-                  {formatBytes(file.size)} · {file.providerName}
-                </p>
+            <div className="w-10 h-1 rounded-full bg-line-strong mx-auto mt-2.5 sm:hidden shrink-0" />
+
+            {/* Responsive Header: Uncrushed Title + Action Bar */}
+            <div className="px-4 sm:px-6 py-3.5 sm:py-4 border-b border-line flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0">
+              <div className="flex items-start justify-between gap-3 min-w-0">
+                <div className="min-w-0">
+                  <h3 className="text-[15px] font-semibold text-ink break-words sm:truncate leading-snug">
+                    {file.name}
+                  </h3>
+                  <p className="text-xs text-ink-muted mt-0.5 font-mono truncate">
+                    {formatBytes(file.size)} · {file.providerName}
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={onClose}
+                  aria-label="Close preview"
+                  className="sm:hidden p-2 -mr-1 -mt-1 rounded-full text-ink-muted hover:text-ink active:bg-elevated shrink-0"
+                >
+                  <X className="w-5 h-5" />
+                </button>
               </div>
 
-              <div className="flex items-center gap-2 shrink-0">
+              <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap shrink-0">
+                {editable && (
+                  <button
+                    type="button"
+                    onClick={handleSave}
+                    disabled={saving}
+                    className="flex-1 sm:flex-initial px-4 py-2 sm:py-1.5 rounded-full bg-accent hover:bg-accent-hover text-accent-fg font-semibold text-xs inline-flex items-center justify-center gap-1.5 shadow-glow transition disabled:opacity-60"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    <span>{saving ? 'Saving...' : 'Save'}</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => onDownload(file)}
+                  className="flex-1 sm:flex-initial px-3.5 py-2 sm:py-1.5 rounded-full bg-elevated hover:bg-canvas border border-line text-ink text-xs font-medium inline-flex items-center justify-center gap-1.5 transition"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Download</span>
+                </button>
                 {file.webUrl && (
                   <a
                     href={file.webUrl}
                     target="_blank"
                     rel="noreferrer"
-                    className="px-3.5 py-1.5 rounded-full bg-elevated hover:bg-canvas text-xs text-ink-secondary hover:text-ink inline-flex items-center gap-1.5 transition"
+                    className="px-3.5 py-2 sm:py-1.5 rounded-full bg-elevated hover:bg-canvas text-xs text-ink-secondary hover:text-ink inline-flex items-center justify-center gap-1.5 transition"
                   >
-                    Cloud <ExternalLink className="w-3.5 h-3.5" />
+                    <span>Cloud</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
                   </a>
                 )}
-                {editable && (
-                  <button
-                    onClick={handleSave}
-                    disabled={saving}
-                    className="px-4 py-1.5 rounded-full bg-accent hover:bg-accent-hover text-accent-fg font-semibold text-xs inline-flex items-center gap-1.5 shadow-glow transition"
-                  >
-                    <Save className="w-3.5 h-3.5" />
-                    {saving ? 'Saving...' : 'Save'}
-                  </button>
-                )}
                 <button
-                  onClick={() => onDownload(file)}
-                  className="px-3.5 py-1.5 rounded-full bg-elevated hover:bg-canvas border border-line text-ink text-xs font-medium inline-flex items-center gap-1.5 transition"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  Download
-                </button>
-                <button
+                  type="button"
                   onClick={onClose}
-                  className="p-2 rounded-full text-ink-muted hover:text-ink hover:bg-elevated transition"
+                  aria-label="Close preview"
+                  className="hidden sm:inline-flex p-2 rounded-full text-ink-muted hover:text-ink hover:bg-elevated transition"
                 >
                   <X className="w-4 h-4" />
                 </button>
               </div>
             </div>
 
-            {/* Metadata Controls */}
-            <div className="px-6 py-2.5 border-b border-line bg-canvas/50 flex flex-wrap items-center gap-4 text-xs">
-              <div className="flex items-center gap-2">
-                <span className="text-ink-muted">Carpeta:</span>
+            {/* Metadata Controls (Mobile-Safe Truncated Selects) */}
+            <div className="px-4 sm:px-6 py-2.5 border-b border-line bg-canvas/50 flex flex-wrap items-center gap-2.5 sm:gap-4 text-xs shrink-0">
+              <div className="flex items-center gap-1.5 min-w-0 flex-1 sm:flex-initial">
+                <Folder className="w-3.5 h-3.5 text-[#D97757] shrink-0" />
+                <span className="text-ink-muted hidden sm:inline">Carpeta:</span>
                 <select
                   value={file.folderId || ''}
                   onChange={(e) => onMoveFolder(file, e.target.value || null)}
-                  className="px-3 py-1 rounded-xl bg-surface border border-line-strong text-ink focus:outline-none"
+                  className="min-w-0 flex-1 sm:w-auto max-w-full truncate px-2.5 py-1.5 sm:py-1 rounded-xl bg-surface border border-line-strong text-ink focus:outline-none"
                 >
                   <option value="">/ My Vault</option>
                   {folders
@@ -177,12 +196,13 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
               </div>
 
               {!isOffline && accounts.length > 1 && (
-                <div className="flex items-center gap-2">
-                  <span className="text-ink-muted">Cloud Provider:</span>
+                <div className="flex items-center gap-1.5 min-w-0 flex-1 sm:flex-initial">
+                  <Cloud className="w-3.5 h-3.5 text-accent shrink-0" />
+                  <span className="text-ink-muted hidden sm:inline">Cloud:</span>
                   <select
                     value={file.accountId}
                     onChange={(e) => onMoveProvider(file, e.target.value)}
-                    className="px-3 py-1 rounded-xl bg-surface border border-line-strong text-ink focus:outline-none"
+                    className="min-w-0 flex-1 sm:w-auto max-w-full truncate px-2.5 py-1.5 sm:py-1 rounded-xl bg-surface border border-line-strong text-ink focus:outline-none"
                   >
                     {accounts.map((acc) => (
                       <option key={acc.id} value={acc.id}>
@@ -194,40 +214,44 @@ export const FilePreviewModal: React.FC<FilePreviewModalProps> = ({
               )}
             </div>
 
-            {/* Preview / Editor Canvas */}
-            <div className="flex-1 overflow-auto p-6 bg-canvas">
+            {/* Flexible Preview / Editor Canvas (Dynamic Keyboard-Safe Height) */}
+            <div className="flex-1 min-h-0 overflow-auto p-3.5 sm:p-6 bg-canvas flex flex-col">
               {editable ? (
                 <textarea
                   value={textValue}
                   onChange={(e) => setTextValue(e.target.value)}
                   spellCheck={false}
-                  className="w-full h-[54vh] p-5 rounded-2xl bg-surface border border-line focus:border-accent focus:ring-4 focus:ring-accent-soft focus:outline-none font-mono text-xs sm:text-sm text-ink leading-relaxed resize-none transition-all"
+                  className="flex-1 min-h-[200px] w-full p-4 sm:p-5 rounded-2xl bg-surface border border-line focus:border-accent focus:ring-4 focus:ring-accent-soft focus:outline-none font-mono text-xs sm:text-sm text-ink leading-relaxed resize-none transition-all"
                 />
               ) : isImage && blobUrl ? (
-                <div className="flex items-center justify-center min-h-[40vh]">
+                <div className="flex-1 flex items-center justify-center min-h-[32vh]">
                   <img
                     src={blobUrl}
                     alt={file.name}
-                    className="max-h-[60vh] max-w-full rounded-2xl object-contain shadow-card"
+                    className="max-h-full max-w-full rounded-2xl object-contain shadow-card"
                   />
                 </div>
               ) : isAudio && blobUrl ? (
-                <div className="py-16 flex justify-center">
+                <div className="flex-1 py-12 flex items-center justify-center">
                   <audio controls src={blobUrl} className="w-full max-w-md" />
                 </div>
               ) : isVideo && blobUrl ? (
-                <div className="flex justify-center">
-                  <video controls src={blobUrl} className="max-h-[58vh] rounded-2xl" />
+                <div className="flex-1 flex items-center justify-center">
+                  <video
+                    controls
+                    src={blobUrl}
+                    className="max-h-full max-w-full rounded-2xl"
+                  />
                 </div>
               ) : isPdf && blobUrl ? (
                 <iframe
                   src={blobUrl}
                   title={file.name}
-                  className="w-full h-[60vh] rounded-2xl bg-white"
+                  className="flex-1 w-full min-h-[50vh] rounded-2xl bg-white"
                 />
               ) : (
-                <div className="py-16 text-center text-xs text-ink-secondary">
-                  Binary file ({file.mimeType}). Click Download above to save locally.
+                <div className="flex-1 py-16 flex items-center justify-center text-center text-xs text-ink-secondary">
+                  Binary file ({file.mimeType}). Tap Download above to save locally.
                 </div>
               )}
             </div>

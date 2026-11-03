@@ -933,9 +933,20 @@ export function App() {
     setGuestMode(false);
   };
 
+  const handleSelectNavTab = useCallback(
+    (nextTab: NavTab) => {
+      if (nextTab === 'files' && activeTab === 'files') {
+        setCurrentFolderId(null);
+      }
+      setActiveTab(nextTab);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    },
+    [activeTab]
+  );
+
   if (!authReady) {
     return (
-      <div className="min-h-screen bg-canvas flex flex-col items-center justify-center gap-3.5">
+      <div className="min-h-[100dvh] bg-canvas flex flex-col items-center justify-center gap-3.5">
         <motion.div
           animate={{ scale: [0.96, 1.04, 0.96] }}
           transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut' }}
@@ -987,7 +998,7 @@ export function App() {
 
   if (!vault) {
     return (
-      <div className="min-h-screen bg-canvas flex flex-col items-center justify-center gap-3.5">
+      <div className="min-h-[100dvh] bg-canvas flex flex-col items-center justify-center gap-3.5">
         <motion.div
           animate={{ scale: [0.96, 1.04, 0.96] }}
           transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut' }}
@@ -1007,10 +1018,10 @@ export function App() {
   }
 
   return (
-    <div className="min-h-screen flex bg-canvas ambient-canvas text-ink">
+    <div className="min-h-[100dvh] flex bg-canvas ambient-canvas text-ink">
       <Sidebar
         activeTab={activeTab}
-        onSelectTab={setActiveTab}
+        onSelectTab={handleSelectNavTab}
         onResetFolder={() => setCurrentFolderId(null)}
         vault={vault}
         authUser={authUser}
@@ -1022,8 +1033,12 @@ export function App() {
         onChangeTheme={handleChangeTheme}
       />
 
-      <div className="flex-1 flex flex-col min-w-0 pb-24 lg:pb-0">
+      <div className="flex-1 flex flex-col min-w-0 pb-[calc(5.25rem+env(safe-area-inset-bottom,0px))] lg:pb-0">
         <TopBar
+          activeTab={activeTab}
+          onSelectTab={handleSelectNavTab}
+          onResetFolder={() => setCurrentFolderId(null)}
+          vault={vault}
           searchQuery={searchQuery}
           onSearchChange={setSearchQuery}
           isOffline={isOffline}
@@ -1037,8 +1052,9 @@ export function App() {
           theme={theme}
           onChangeTheme={handleChangeTheme}
           authUser={authUser}
-          onOpenAccountTab={() => setActiveTab('database')}
+          onOpenAccountTab={() => handleSelectNavTab('database')}
           onOpenAuthScreen={handleOpenAuthScreen}
+          onLogout={handleLogout}
         />
 
         {/* Smooth Page Transitions */}
@@ -1049,7 +1065,7 @@ export function App() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -6 }}
             transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
-            className="flex-1 flex flex-col"
+            className="flex-1 flex flex-col min-w-0"
           >
             {activeTab === 'providers' ? (
               <ProvidersHub
@@ -1097,7 +1113,9 @@ export function App() {
                 vault={vault}
                 currentFolderId={currentFolderId}
                 onSelectFolder={setCurrentFolderId}
+                onNavigateToProviders={() => handleSelectNavTab('providers')}
                 searchQuery={searchQuery}
+                onClearSearch={() => setSearchQuery('')}
                 isOffline={isOffline}
                 onUploadFiles={handleUploadFiles}
                 onCreateFolder={handleCreateFolder}
@@ -1114,39 +1132,65 @@ export function App() {
         </AnimatePresence>
       </div>
 
-      {/* Floating Glass Mobile Dock with Gliding Pill */}
-      <nav className="fixed bottom-3 inset-x-4 z-30 lg:hidden rounded-full bg-surface/90 backdrop-blur-xl border border-line-strong px-2 py-1.5 flex items-center justify-around shadow-float">
-        {[
-          { id: 'files' as NavTab, label: 'Files', icon: FolderClosed },
-          { id: 'providers' as NavTab, label: 'Clouds', icon: Cloud },
-          { id: 'ai-keys' as NavTab, label: 'AI API', icon: KeyRound },
-          { id: 'database' as NavTab, label: 'DB', icon: Database },
-          { id: 'android' as NavTab, label: 'Android', icon: Smartphone },
-        ].map((item) => {
-          const Icon = item.icon;
-          const active = activeTab === item.id;
-          return (
-            <button
-              key={item.id}
-              onClick={() => setActiveTab(item.id)}
-              className={`relative flex items-center gap-1.5 px-3.5 py-2 rounded-full text-xs font-medium transition-colors ${
-                active ? 'text-ink' : 'text-ink-muted hover:text-ink'
-              }`}
-            >
-              {active && (
-                <motion.span
-                  layoutId="mobileDockPill"
-                  transition={{ type: 'spring', stiffness: 450, damping: 32 }}
-                  className="absolute inset-0 rounded-full bg-elevated border border-line-strong"
-                />
-              )}
-              <Icon
-                className={`relative z-10 w-4 h-4 ${active ? 'text-accent' : ''}`}
-              />
-              {active && <span className="relative z-10">{item.label}</span>}
-            </button>
-          );
-        })}
+      {/* Native-Style Glass Mobile Navigation Bar with Safe-Area Support */}
+      <nav
+        aria-label="Primary Mobile Navigation"
+        className="fixed bottom-0 inset-x-0 z-30 lg:hidden bg-sidebar/94 backdrop-blur-2xl border-t border-line px-2 pt-1.5 pb-[max(0.45rem,env(safe-area-inset-bottom,0px))]"
+      >
+        <div className="max-w-md mx-auto grid grid-cols-5 gap-1">
+          {[
+            { id: 'files' as NavTab, label: 'Files', icon: FolderClosed },
+            {
+              id: 'providers' as NavTab,
+              label: 'Clouds',
+              icon: Cloud,
+              badge: vault.accounts.length > 0 ? vault.accounts.length : null,
+            },
+            { id: 'ai-keys' as NavTab, label: 'AI API', icon: KeyRound },
+            { id: 'database' as NavTab, label: 'Database', icon: Database },
+            { id: 'android' as NavTab, label: 'Android', icon: Smartphone },
+          ].map((item) => {
+            const Icon = item.icon;
+            const active = activeTab === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => handleSelectNavTab(item.id)}
+                className={`relative flex flex-col items-center justify-center gap-0.5 py-1.5 rounded-2xl transition-colors ${
+                  active ? 'text-ink' : 'text-ink-muted active:text-ink'
+                }`}
+              >
+                {active && (
+                  <motion.span
+                    layoutId="mobileDockPill"
+                    transition={{ type: 'spring', stiffness: 450, damping: 34 }}
+                    className="absolute inset-x-1 inset-y-0.5 rounded-2xl bg-surface border border-line-strong shadow-card"
+                  />
+                )}
+                <span className="relative z-10 flex items-center justify-center">
+                  <Icon
+                    className={`w-[18px] h-[18px] transition-colors ${
+                      active ? 'text-accent' : ''
+                    }`}
+                  />
+                  {item.badge && (
+                    <span className="absolute -top-1 -right-2.5 min-w-[14px] h-[14px] px-1 rounded-full bg-accent text-white text-[9px] font-mono font-bold flex items-center justify-center leading-none">
+                      {item.badge}
+                    </span>
+                  )}
+                </span>
+                <span
+                  className={`relative z-10 text-[10px] font-medium leading-tight tracking-tight ${
+                    active ? 'text-ink font-semibold' : 'text-ink-muted'
+                  }`}
+                >
+                  {item.label}
+                </span>
+              </button>
+            );
+          })}
+        </div>
       </nav>
 
       <FilePreviewModal
@@ -1166,7 +1210,7 @@ export function App() {
         onDownload={handleDownloadFile}
       />
 
-      {/* Spring Toast Notification */}
+      {/* Spring Toast Notification (Safe on Narrow Mobile Screens) */}
       <AnimatePresence>
         {toast && (
           <motion.div
@@ -1174,10 +1218,10 @@ export function App() {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 10, scale: 0.95 }}
             transition={{ type: 'spring', stiffness: 450, damping: 30 }}
-            className="fixed bottom-20 lg:bottom-6 right-5 z-50 px-4 py-2.5 rounded-full bg-surface border border-line-strong text-xs font-medium text-ink shadow-float inline-flex items-center gap-2"
+            className="fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom,0px))] lg:bottom-6 inset-x-4 sm:inset-x-auto sm:right-6 z-50 mx-auto sm:mx-0 w-fit max-w-[calc(100vw-2rem)] px-4 py-2.5 rounded-full bg-surface/95 backdrop-blur-xl border border-line-strong text-xs font-medium text-ink shadow-float flex items-center gap-2"
           >
-            <CheckCircle2 className="w-4 h-4 text-[#10A37F]" />
-            <span>{toast}</span>
+            <CheckCircle2 className="w-4 h-4 text-[#10A37F] shrink-0" />
+            <span className="truncate">{toast}</span>
           </motion.div>
         )}
       </AnimatePresence>

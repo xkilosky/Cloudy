@@ -105,11 +105,11 @@ export const AuthView: React.FC<AuthViewProps> = ({
   };
 
   return (
-    <div className="min-h-screen bg-canvas text-ink flex flex-col justify-between relative overflow-hidden px-4 py-6 sm:py-10">
+    <div className="min-h-[100dvh] pt-safe pb-safe bg-canvas text-ink flex flex-col justify-between relative overflow-hidden px-4 py-5 sm:py-10">
       {/* Subtle Studio Ambient Glow */}
       <div
-        className="pointer-events-none absolute -top-36 left-1/2 -translate-x-1/2 w-[640px] h-[360px] rounded-full blur-3xl opacity-20 transition-colors duration-500"
-        style={{ background: 'var(--bg-accent)' }}
+        className="pointer-events-none absolute -top-36 left-1/2 -translate-x-1/2 w-[560px] max-w-[140vw] h-[340px] rounded-full blur-3xl opacity-20 transition-colors duration-500"
+        style={{ background: 'var(--accent)' }}
       />
 
       {/* Top Bar: Brand + Studio Palette Dots */}

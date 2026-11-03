@@ -413,21 +413,25 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
 
   const codeToDisplay = snippetTab === 'ollama' ? ollamaSnippet : curlSnippet;
 
+  const isMobileUa =
+    typeof navigator !== 'undefined' &&
+    /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
   return (
-    <div className="flex-1 px-4 sm:px-8 py-7">
-      <div className="max-w-5xl mx-auto space-y-7">
+    <div className="flex-1 px-3.5 sm:px-8 py-5 sm:py-7 min-w-0">
+      <div className="max-w-5xl mx-auto space-y-6 sm:space-y-7 min-w-0">
         {/* Header + Segmented Mode Switcher */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3.5">
           <div>
             <h1 className="text-xl font-semibold text-ink tracking-tight">
-              Plug & Play Local AI
+              Plug &amp; Play Local AI
             </h1>
-            <p className="text-xs text-ink-secondary mt-1">
-              Scan your AI apps for automatic setup instructions, or chat directly with your offline & online models.
+            <p className="text-xs text-ink-secondary mt-1 leading-relaxed">
+              Scan your AI apps for automatic setup instructions, or chat directly with your offline &amp; online models.
             </p>
           </div>
 
-          <div className="inline-flex bg-surface border border-line-strong rounded-full p-1 text-xs shadow-card w-fit">
+          <div className="grid grid-cols-2 sm:inline-flex bg-surface border border-line-strong rounded-2xl sm:rounded-full p-1 text-xs shadow-card w-full sm:w-fit shrink-0">
             {[
               { id: 'plug_play' as const, label: 'Plug & Play', icon: PlugZap },
               { id: 'keys_code' as const, label: 'API Keys & Code', icon: KeyRound },
@@ -437,8 +441,9 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
               return (
                 <button
                   key={tab.id}
+                  type="button"
                   onClick={() => setViewMode(tab.id)}
-                  className={`relative px-4 py-1.5 rounded-full font-medium inline-flex items-center gap-1.5 transition-colors ${
+                  className={`relative px-3.5 sm:px-4 py-2 sm:py-1.5 rounded-xl sm:rounded-full font-medium inline-flex items-center justify-center gap-1.5 transition-colors ${
                     active ? 'text-accent-fg' : 'text-ink-secondary hover:text-ink'
                   }`}
                 >
@@ -446,16 +451,33 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
                     <motion.span
                       layoutId="aiViewModePill"
                       transition={{ type: 'spring', stiffness: 450, damping: 32 }}
-                      className="absolute inset-0 rounded-full bg-accent shadow-glow"
+                      className="absolute inset-0 rounded-xl sm:rounded-full bg-accent shadow-glow"
                     />
                   )}
-                  <Icon className="relative z-10 w-3.5 h-3.5" />
-                  <span className="relative z-10">{tab.label}</span>
+                  <Icon className="relative z-10 w-3.5 h-3.5 shrink-0" />
+                  <span className="relative z-10 truncate">{tab.label}</span>
                 </button>
               );
             })}
           </div>
         </div>
+
+        {isMobileUa && (
+          <div className="p-3.5 rounded-2xl bg-surface/85 border border-line flex items-start justify-between gap-3 text-xs text-ink-secondary">
+            <div className="leading-relaxed">
+              <strong className="text-ink">On Mobile:</strong> Create &amp; copy scoped{' '}
+              <code className="font-mono text-accent">cldy_sk_...</code> keys under{' '}
+              <button
+                type="button"
+                onClick={() => setViewMode('keys_code')}
+                className="text-accent font-medium underline"
+              >
+                API Keys &amp; Code
+              </button>{' '}
+              for cloud AI apps, or open Cloudy on your PC/Mac to auto-scan desktop Ollama &amp; LM Studio ports.
+            </div>
+          </div>
+        )}
 
         <AnimatePresence mode="wait">
           {viewMode === 'plug_play' ? (
@@ -498,12 +520,12 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2 flex-wrap">
+                  <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap min-w-0">
                     <select
                       value={selectedKeyObj?.id || ''}
                       onChange={(e) => setSelectedKeyId(e.target.value)}
                       title="Choose which Cloudy permission key to link"
-                      className="px-3 py-2 rounded-full bg-canvas border border-line text-xs text-ink focus:outline-none"
+                      className="min-w-0 flex-1 sm:flex-initial max-w-full truncate px-3 py-2 rounded-full bg-canvas border border-line text-xs text-ink focus:outline-none"
                     >
                       {activeKeys.map((k) => (
                         <option key={k.id} value={k.id} className="bg-surface">
@@ -522,7 +544,7 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
                         runAppScan();
                         scanLocalAiModels();
                       }}
-                      className="px-4 py-2 rounded-full bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center gap-1.5 shadow-glow transition"
+                      className="w-full sm:w-auto px-4 py-2.5 sm:py-2 rounded-full bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center justify-center gap-1.5 shadow-glow transition shrink-0"
                     >
                       <Radar
                         className={`w-3.5 h-3.5 ${scanningApps ? 'animate-spin' : ''}`}
@@ -1222,18 +1244,18 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
                             </span>
                           </div>
 
-                          <div className="flex items-center gap-3 text-xs font-mono text-ink-muted">
-                            <span className="truncate">
+                          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs font-mono text-ink-muted min-w-0">
+                            <span className="truncate max-w-full">
                               {revealed ? k.key : k.keyPrefix}
                             </span>
-                            <span className="text-[11px] font-sans">
+                            <span className="text-[11px] font-sans shrink-0">
                               · {k.usageCount || 0} calls ·{' '}
                               {formatRelativeTime(k.lastUsedAt)}
                             </span>
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-1.5 shrink-0">
+                        <div className="flex items-center gap-1.5 flex-wrap shrink-0">
                           <button
                             onClick={() =>
                               setRevealedIds((p) => ({ ...p, [k.id]: !p[k.id] }))
@@ -1288,15 +1310,16 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
               </section>
 
               {/* Code Snippets + Live Endpoint Runner */}
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-                <div className="lg:col-span-7 rounded-3xl bg-surface border border-line p-5 space-y-4 shadow-card">
-                  <div className="flex items-center justify-between">
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 min-w-0">
+                <div className="lg:col-span-7 min-w-0 rounded-3xl bg-surface border border-line p-4 sm:p-5 space-y-4 shadow-card">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
                     <div className="inline-flex bg-canvas border border-line rounded-full p-1 text-xs">
                       {(['ollama', 'curl'] as const).map((tab) => {
                         const active = snippetTab === tab;
                         return (
                           <button
                             key={tab}
+                            type="button"
                             onClick={() => setSnippetTab(tab)}
                             className={`relative px-3.5 py-1.5 rounded-full font-medium transition-colors ${
                               active
@@ -1324,6 +1347,7 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
                     </div>
 
                     <button
+                      type="button"
                       onClick={() => copyText('snippet', codeToDisplay)}
                       className="text-xs text-accent hover:underline inline-flex items-center gap-1 font-medium"
                     >
@@ -1339,20 +1363,20 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
                     </button>
                   </div>
 
-                  <pre className="p-4 rounded-2xl bg-canvas border border-line text-xs font-mono text-ink overflow-x-auto leading-relaxed">
+                  <pre className="p-3.5 sm:p-4 rounded-2xl bg-canvas border border-line text-xs font-mono text-ink max-w-full overflow-x-auto leading-relaxed">
                     {codeToDisplay}
                   </pre>
                 </div>
 
-                <div className="lg:col-span-5 rounded-3xl bg-surface border border-line p-5 space-y-4 shadow-card">
+                <div className="lg:col-span-5 min-w-0 rounded-3xl bg-surface border border-line p-4 sm:p-5 space-y-4 shadow-card">
                   <div className="text-xs font-medium text-ink-secondary">
                     Interactive Endpoint Tester
                   </div>
-                  <div className="flex gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
                     <select
                       value={testEndpoint}
                       onChange={(e) => setTestEndpoint(e.target.value)}
-                      className="flex-1 px-3.5 py-2 rounded-2xl bg-canvas border border-line text-xs font-mono text-ink focus:outline-none"
+                      className="min-w-0 flex-1 truncate px-3 py-2 rounded-2xl bg-canvas border border-line text-xs font-mono text-ink focus:outline-none"
                     >
                       <option value="/api/v1/ai/status">GET /api/v1/ai/status</option>
                       <option value="/api/v1/ai/sync-manifest">
@@ -1368,19 +1392,20 @@ curl -s "${origin}/api/v1/ai/files/fil_welcome/content" -H "Authorization: Beare
                       </option>
                     </select>
                     <motion.button
+                      type="button"
                       whileHover={{ scale: 1.03 }}
                       whileTap={{ scale: 0.96 }}
                       onClick={runLiveTest}
                       disabled={testing || !selectedKeyObj}
-                      className="px-4 py-2 rounded-full bg-accent hover:bg-accent-hover text-accent-fg font-semibold text-xs inline-flex items-center gap-1.5 shadow-glow transition"
+                      className="shrink-0 px-4 py-2 rounded-full bg-accent hover:bg-accent-hover text-accent-fg font-semibold text-xs inline-flex items-center gap-1.5 shadow-glow transition"
                     >
                       <Play className="w-3.5 h-3.5" />
                       Run
                     </motion.button>
                   </div>
 
-                  <pre className="p-4 rounded-2xl bg-canvas border border-line text-[11px] font-mono text-ink-secondary h-52 overflow-auto">
-                    {testOutput || '// Click Run to inspect live JSON response'}
+                  <pre className="p-3.5 sm:p-4 rounded-2xl bg-canvas border border-line text-[11px] font-mono text-ink-secondary h-52 max-w-full overflow-auto">
+                    {testOutput || '// Tap Run to inspect live JSON response'}
                   </pre>
                 </div>
               </div>

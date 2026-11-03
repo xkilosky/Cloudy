@@ -292,23 +292,26 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
         interval: baseIntervalSec,
       });
 
+      const isMobileViewport = window.innerWidth < 768;
       try {
         await navigator.clipboard.writeText(data.userCode);
         setCopiedCode(true);
         setTimeout(() => setCopiedCode(false), 3000);
       } catch {
-        // ignore clipboard block
+        // Mobile browsers may require synchronous tap gesture to copy
       }
 
-      const width = 520;
-      const height = 660;
-      const left = window.screenX + (window.outerWidth - width) / 2;
-      const top = window.screenY + (window.outerHeight - height) / 2;
-      window.open(
-        data.verificationUri,
-        `cloudy_device_${provider.id}`,
-        `width=${width},height=${height},left=${left},top=${top}`
-      );
+      if (!isMobileViewport) {
+        const width = 520;
+        const height = 660;
+        const left = window.screenX + (window.outerWidth - width) / 2;
+        const top = window.screenY + (window.outerHeight - height) / 2;
+        window.open(
+          data.verificationUri,
+          `cloudy_device_${provider.id}`,
+          `width=${width},height=${height},left=${left},top=${top}`
+        );
+      }
 
       setLoading(false);
 
@@ -410,6 +413,11 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
     setErrorMsg(null);
     setLoading(true);
 
+    const isMobileViewport = window.innerWidth < 768;
+    const preOpenedWin = isMobileViewport
+      ? window.open('about:blank', '_blank')
+      : null;
+
     try {
       const res = await apiFetch('/api/nextcloud/login-init', {
         method: 'POST',
@@ -419,15 +427,21 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Could not start Nextcloud sign-in');
 
-      const width = 520;
-      const height = 660;
-      const left = window.screenX + (window.outerWidth - width) / 2;
-      const top = window.screenY + (window.outerHeight - height) / 2;
-      window.open(
-        data.loginUrl,
-        'cloudy_nextcloud_login',
-        `width=${width},height=${height},left=${left},top=${top}`
-      );
+      if (preOpenedWin && !preOpenedWin.closed) {
+        preOpenedWin.location.href = data.loginUrl;
+      } else if (isMobileViewport) {
+        window.open(data.loginUrl, '_blank');
+      } else {
+        const width = 520;
+        const height = 660;
+        const left = window.screenX + (window.outerWidth - width) / 2;
+        const top = window.screenY + (window.outerHeight - height) / 2;
+        window.open(
+          data.loginUrl,
+          'cloudy_nextcloud_login',
+          `width=${width},height=${height},left=${left},top=${top}`
+        );
+      }
 
       setNcFlow({
         loginUrl: data.loginUrl,
@@ -499,6 +513,13 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
       immediateCheckFnRef.current = () => executeNcPoll(true);
       pollTimeoutRef.current = window.setTimeout(() => executeNcPoll(false), 2600);
     } catch (err: unknown) {
+      if (preOpenedWin && !preOpenedWin.closed) {
+        try {
+          preOpenedWin.close();
+        } catch {
+          // ignore
+        }
+      }
       setLoading(false);
       setNcFlow(null);
       setErrorMsg(err instanceof Error ? err.message : String(err));
@@ -516,15 +537,19 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
 
     const qs = new URLSearchParams({ vaultId: getOrCreateVaultId() });
     const authorizeHref = `/api/oauth/${provider.id}/authorize?${qs.toString()}`;
-    const width = 520;
-    const height = 660;
-    const left = window.screenX + (window.outerWidth - width) / 2;
-    const top = window.screenY + (window.outerHeight - height) / 2;
-    window.open(
-      authorizeHref,
-      `cloudy_oauth_${provider.id}`,
-      `width=${width},height=${height},left=${left},top=${top}`
-    );
+    if (window.innerWidth < 768) {
+      window.open(authorizeHref, '_blank');
+    } else {
+      const width = 520;
+      const height = 660;
+      const left = window.screenX + (window.outerWidth - width) / 2;
+      const top = window.screenY + (window.outerHeight - height) / 2;
+      window.open(
+        authorizeHref,
+        `cloudy_oauth_${provider.id}`,
+        `width=${width},height=${height},left=${left},top=${top}`
+      );
+    }
 
     setOauthWaiting(authorizeHref);
     const providerId = provider.id;
@@ -631,15 +656,23 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
   const openGooglePlaygroundPopup = () => {
     const u =
       'https://developers.google.com/oauthplayground/#step1&apisSelect=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive&url=https%3A%2F%2F&content_type=application%2Fjson&http_method=GET';
-    const width = 620;
-    const height = 700;
-    const left = window.screenX + (window.outerWidth - width) / 2;
-    const top = window.screenY + (window.outerHeight - height) / 2;
-    window.open(u, 'cloudy_gplayground', `width=${width},height=${height},left=${left},top=${top}`);
+    if (window.innerWidth < 768) {
+      window.open(u, '_blank');
+    } else {
+      const width = 620;
+      const height = 700;
+      const left = window.screenX + (window.outerWidth - width) / 2;
+      const top = window.screenY + (window.outerHeight - height) / 2;
+      window.open(
+        u,
+        'cloudy_gplayground',
+        `width=${width},height=${height},left=${left},top=${top}`
+      );
+    }
   };
 
   const inputCls =
-    'w-full px-4 py-2.5 rounded-2xl bg-canvas border border-line-strong focus:border-accent focus:ring-4 focus:ring-accent-soft focus:outline-none text-xs text-ink placeholder:text-ink-muted transition-all';
+    'w-full px-4 py-3 sm:py-2.5 rounded-2xl bg-canvas border border-line-strong focus:border-accent focus:ring-4 focus:ring-accent-soft focus:outline-none text-xs text-ink placeholder:text-ink-muted transition-all';
 
   return (
     <AnimatePresence>
@@ -649,16 +682,17 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           onClick={handleClose}
-          className="fixed inset-0 z-50 bg-black/65 backdrop-blur-md flex items-center justify-center p-4"
+          className="fixed inset-0 z-50 bg-black/65 backdrop-blur-md flex items-end sm:items-center justify-center p-0 sm:p-4"
         >
           <motion.div
-            initial={{ opacity: 0, scale: 0.95, y: 12 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.96, y: 10 }}
-            transition={{ type: 'spring', stiffness: 420, damping: 30 }}
+            initial={{ opacity: 0, y: 28, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 24, scale: 0.98 }}
+            transition={{ type: 'spring', stiffness: 420, damping: 32 }}
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-sm rounded-3xl bg-surface border border-line-strong p-6 space-y-5 shadow-float max-h-[90vh] overflow-y-auto"
+            className="w-full sm:max-w-sm rounded-t-3xl sm:rounded-3xl bg-surface border-t sm:border border-line-strong p-5 sm:p-6 pb-[max(1.5rem,env(safe-area-inset-bottom,0px))] sm:pb-6 space-y-5 shadow-float max-h-[92dvh] overflow-y-auto"
           >
+            <div className="w-10 h-1 rounded-full bg-line-strong mx-auto sm:hidden" />
             {/* Header */}
             <div className="flex items-start justify-between gap-3">
               <div>
@@ -753,29 +787,53 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
                     className="p-4 rounded-2xl bg-canvas border border-line-strong text-center space-y-3"
                   >
                     <div className="text-[11px] text-ink-secondary">
-                      Enter code in sign-in tab (already copied):
+                      1. Tap code to copy, then approve in {provider.name}:
                     </div>
-                    <div className="flex items-center justify-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(deviceFlow.userCode);
+                        setCopiedCode(true);
+                        setTimeout(() => setCopiedCode(false), 2200);
+                      }}
+                      className="w-full py-2.5 px-4 rounded-2xl bg-surface hover:bg-elevated border border-line-strong flex items-center justify-center gap-2.5 transition"
+                    >
                       <span className="text-2xl font-mono font-bold tracking-widest text-accent">
                         {deviceFlow.userCode}
                       </span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          navigator.clipboard.writeText(deviceFlow.userCode);
-                          setCopiedCode(true);
-                          setTimeout(() => setCopiedCode(false), 2000);
-                        }}
-                        className="p-1.5 rounded-xl bg-surface text-ink-secondary hover:text-ink"
-                      >
+                      <span className="p-1.5 rounded-xl bg-canvas text-ink-secondary">
                         {copiedCode ? (
                           <Check className="w-4 h-4 text-[#10A37F]" />
                         ) : (
                           <Copy className="w-4 h-4" />
                         )}
-                      </button>
-                    </div>
-                    <div className="flex items-center justify-center gap-2 text-xs text-ink-secondary pt-1">
+                      </span>
+                    </button>
+                    {copiedCode && (
+                      <div className="text-[11px] text-[#10A37F] font-medium">
+                        ✓ Code copied to clipboard
+                      </div>
+                    )}
+
+                    <a
+                      href={deviceFlow.verificationUri}
+                      target="_blank"
+                      rel="noreferrer"
+                      onClick={() => {
+                        try {
+                          navigator.clipboard.writeText(deviceFlow.userCode);
+                          setCopiedCode(true);
+                        } catch {
+                          // ignore
+                        }
+                      }}
+                      className="w-full py-2.5 px-4 rounded-full bg-accent hover:bg-accent-hover text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 shadow-glow transition"
+                    >
+                      <span>Copy Code &amp; Open {provider.name}</span>
+                      <ExternalLink className="w-3.5 h-3.5" />
+                    </a>
+
+                    <div className="flex items-center justify-center gap-2 text-xs text-ink-secondary pt-0.5">
                       <Loader2 className="w-3.5 h-3.5 animate-spin text-accent" />
                       <span>
                         {checkingNow
@@ -788,24 +846,15 @@ export const ConnectProviderModal: React.FC<ConnectProviderModalProps> = ({
                       type="button"
                       disabled={checkingNow}
                       onClick={handleManualCheckNow}
-                      className="w-full py-2.5 px-4 rounded-full bg-accent hover:bg-accent-hover disabled:opacity-60 text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 shadow-card transition"
+                      className="w-full py-2.5 px-4 rounded-full bg-elevated hover:bg-surface border border-line-strong disabled:opacity-60 text-ink text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition"
                     >
                       {checkingNow ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-accent" />
                       ) : (
-                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <CheckCircle2 className="w-3.5 h-3.5 text-[#10A37F]" />
                       )}
                       <span>I&apos;ve Authorized It — Connect Now</span>
                     </button>
-
-                    <a
-                      href={deviceFlow.verificationUri}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-[11px] text-accent hover:underline inline-flex items-center gap-1"
-                    >
-                      Re-open login window <ExternalLink className="w-3 h-3" />
-                    </a>
                   </motion.div>
                 )}
               </div>

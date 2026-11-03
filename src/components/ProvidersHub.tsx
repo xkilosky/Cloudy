@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Plus,
@@ -9,6 +9,7 @@ import {
   Zap,
   X,
   Loader2,
+  Search,
 } from 'lucide-react';
 import type {
   VaultState,
@@ -39,6 +40,8 @@ const RULES: { id: AllocationRule; label: string }[] = [
   { id: 'mirror', label: '2x Mirror' },
 ];
 
+type CatalogFilter = 'all' | 'instant' | 'connected' | 's3';
+
 export const ProvidersHub: React.FC<ProvidersHubProps> = ({
   vault,
   isOffline,
@@ -51,6 +54,10 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
   const [selectedProvider, setSelectedProvider] =
     useState<ProviderCatalogItem | null>(null);
   const [syncingAccId, setSyncingAccId] = useState<string | null>(null);
+  const [syncingAll, setSyncingAll] = useState(false);
+
+  const [catalogFilter, setCatalogFilter] = useState<CatalogFilter>('all');
+  const [catalogSearch, setCatalogSearch] = useState('');
 
   const [showRcloneModal, setShowRcloneModal] = useState(false);
   const [rcloneText, setRcloneText] = useState('');
@@ -68,6 +75,18 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
       await onSyncAccount(id);
     } finally {
       setSyncingAccId(null);
+    }
+  };
+
+  const handleSyncAll = async () => {
+    if (syncingAll || isOffline || vault.accounts.length === 0) return;
+    setSyncingAll(true);
+    try {
+      for (const acc of vault.accounts) {
+        await onSyncAccount(acc.id);
+      }
+    } finally {
+      setSyncingAll(false);
     }
   };
 
@@ -100,15 +119,39 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
     }
   };
 
+  const filteredProviders = useMemo(() => {
+    const q = catalogSearch.trim().toLowerCase();
+    return vault.providersCatalog.filter((p) => {
+      const isConnected = vault.accounts.some((a) => a.providerId === p.id);
+      if (catalogFilter === 'instant' && !p.zeroConsole) return false;
+      if (catalogFilter === 'connected' && !isConnected) return false;
+      if (
+        catalogFilter === 's3' &&
+        p.authMode !== 's3' &&
+        p.authMode !== 'supabase'
+      ) {
+        return false;
+      }
+      if (q) {
+        return (
+          p.name.toLowerCase().includes(q) ||
+          p.description.toLowerCase().includes(q) ||
+          p.freeLabel.toLowerCase().includes(q)
+        );
+      }
+      return true;
+    });
+  }, [vault.providersCatalog, vault.accounts, catalogFilter, catalogSearch]);
+
   return (
-    <div className="flex-1 px-4 sm:px-8 py-7">
-      <div className="max-w-5xl mx-auto space-y-10">
+    <div className="flex-1 px-3.5 sm:px-8 py-5 sm:py-7 min-w-0">
+      <div className="max-w-5xl mx-auto space-y-8 sm:space-y-10 min-w-0">
         {/* Ambient Storage Pool Hero Card */}
         <motion.div
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.28 }}
-          className="relative overflow-hidden rounded-3xl bg-surface border border-line-strong p-6 sm:p-8 shadow-card flex flex-col lg:flex-row lg:items-center justify-between gap-6"
+          className="relative overflow-hidden rounded-3xl bg-surface border border-line-strong p-5 sm:p-8 shadow-card flex flex-col lg:flex-row lg:items-center justify-between gap-5 sm:gap-6"
         >
           <div
             className="pointer-events-none absolute -top-24 -left-24 w-72 h-72 rounded-full blur-3xl opacity-35"
@@ -119,11 +162,11 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
             <div className="text-xs font-medium text-ink-secondary">
               Unified Cloud Pool · Free Storage. One System. Your Rules.
             </div>
-            <div className="flex items-baseline gap-3">
+            <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
               <span className="text-3xl sm:text-4xl font-bold text-ink font-mono tabular-nums tracking-tight">
                 {rawQuota > 0 ? formatBytes(rawQuota, 1) : '0 GB'}
               </span>
-              <span className="text-sm text-ink-muted font-mono tabular-nums">
+              <span className="text-xs sm:text-sm text-ink-muted font-mono tabular-nums">
                 {rawQuota > 0
                   ? `${formatBytes(totalUsed)} used`
                   : 'Connect a real account below'}
@@ -139,21 +182,22 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
             </div>
           </div>
 
-          <div className="relative flex flex-col sm:flex-row items-start sm:items-end gap-3.5">
-            {/* Gliding Routing Rule Pills */}
+          <div className="relative flex flex-col sm:flex-row items-stretch sm:items-end gap-3.5">
+            {/* Responsive Routing Rule Selector (2x2 Grid on Mobile, Single Pill on Desktop) */}
             <div className="space-y-1.5">
               <div className="text-[11px] font-medium text-ink-muted">
                 Routing Strategy
               </div>
-              <div className="inline-flex flex-wrap gap-1 bg-canvas border border-line p-1 rounded-full">
+              <div className="grid grid-cols-2 sm:inline-flex gap-1 bg-canvas border border-line p-1 rounded-2xl sm:rounded-full">
                 {RULES.map((r) => {
                   const active = vault.settings.allocationRule === r.id;
                   return (
                     <button
                       key={r.id}
+                      type="button"
                       disabled={isOffline}
                       onClick={() => onUpdateAllocationRule(r.id)}
-                      className={`relative px-3 py-1.5 rounded-full text-xs font-medium transition-colors ${
+                      className={`relative px-3 py-2 sm:py-1.5 rounded-xl sm:rounded-full text-xs font-medium text-center transition-colors ${
                         active ? 'text-accent-fg' : 'text-ink-secondary hover:text-ink'
                       }`}
                     >
@@ -161,7 +205,7 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
                         <motion.span
                           layoutId="routingRulePill"
                           transition={{ type: 'spring', stiffness: 450, damping: 32 }}
-                          className="absolute inset-0 rounded-full bg-accent shadow-glow"
+                          className="absolute inset-0 rounded-xl sm:rounded-full bg-accent shadow-glow"
                         />
                       )}
                       <span className="relative z-10">{r.label}</span>
@@ -172,29 +216,46 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
             </div>
 
             <motion.button
+              type="button"
               whileHover={{ y: -1 }}
               whileTap={{ scale: 0.97 }}
               disabled={isOffline}
               onClick={() => setShowRcloneModal(true)}
-              className="px-4 py-2 rounded-full bg-elevated hover:bg-canvas border border-line-strong text-ink text-xs font-medium inline-flex items-center gap-2 transition shrink-0"
+              className="w-full sm:w-auto px-4 py-2.5 sm:py-2 rounded-2xl sm:rounded-full bg-elevated hover:bg-canvas border border-line-strong text-ink text-xs font-medium inline-flex items-center justify-center gap-2 transition shrink-0"
             >
               <Upload className="w-3.5 h-3.5 text-accent" />
-              Import rclone.conf
+              <span>Import rclone.conf</span>
             </motion.button>
           </div>
         </motion.div>
 
         {/* Connected Accounts */}
         <section className="space-y-3.5">
-          <h2 className="text-[11px] font-medium uppercase tracking-wider text-ink-muted px-0.5">
-            Verified Connected Accounts · {vault.accounts.length}
-          </h2>
+          <div className="flex items-center justify-between gap-2 px-0.5">
+            <h2 className="text-[11px] font-medium uppercase tracking-wider text-ink-muted">
+              Verified Connected Accounts · {vault.accounts.length}
+            </h2>
+            {!isOffline && vault.accounts.length > 1 && (
+              <button
+                type="button"
+                disabled={syncingAll}
+                onClick={handleSyncAll}
+                className="text-xs font-medium text-accent hover:underline inline-flex items-center gap-1.5 disabled:opacity-50"
+              >
+                <RefreshCw
+                  className={`w-3.5 h-3.5 ${syncingAll ? 'animate-spin' : ''}`}
+                />
+                <span>{syncingAll ? 'Syncing All...' : 'Sync All'}</span>
+              </button>
+            )}
+          </div>
+
           {vault.accounts.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-line-strong bg-surface/40 p-6 text-center text-xs text-ink-secondary">
+            <div className="rounded-2xl border border-dashed border-line-strong bg-surface/40 p-6 text-center text-xs text-ink-secondary leading-relaxed">
               No storage accounts connected yet. Every account below authenticates directly against the real provider — sign in to stack free storage.
             </div>
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-3.5">
               {vault.accounts.map((acc, idx) => {
                 const pct = Math.min(
                   100,
@@ -205,9 +266,12 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
                     key={acc.id}
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.22, delay: Math.min(idx * 0.04, 0.2) }}
+                    transition={{
+                      duration: 0.22,
+                      delay: Math.min(idx * 0.04, 0.2),
+                    }}
                     whileHover={{ y: -2 }}
-                    className="rounded-2xl bg-surface border border-line hover:border-line-strong p-5 flex flex-col justify-between gap-4 shadow-card transition-colors"
+                    className="rounded-2xl bg-surface border border-line hover:border-line-strong p-4 sm:p-5 flex flex-col justify-between gap-4 shadow-card transition-colors"
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
@@ -223,23 +287,27 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
                       {!isOffline && (
                         <div className="flex items-center gap-1 shrink-0">
                           <button
+                            type="button"
                             onClick={() => handleSync(acc.id)}
-                            disabled={syncingAccId === acc.id}
-                            className="p-1.5 rounded-lg text-ink-secondary hover:text-ink hover:bg-elevated transition"
+                            disabled={syncingAccId === acc.id || syncingAll}
+                            className="p-2 rounded-xl text-ink-secondary hover:text-ink hover:bg-elevated active:bg-canvas transition"
                             title="Sync remote files & quota"
                           >
                             <RefreshCw
-                              className={`w-3.5 h-3.5 ${
-                                syncingAccId === acc.id ? 'animate-spin text-accent' : ''
+                              className={`w-4 h-4 ${
+                                syncingAccId === acc.id || syncingAll
+                                  ? 'animate-spin text-accent'
+                                  : ''
                               }`}
                             />
                           </button>
                           <button
+                            type="button"
                             onClick={() => onDisconnectAccount(acc.id)}
-                            className="p-1.5 rounded-lg text-ink-muted hover:text-red-400 hover:bg-elevated transition"
+                            className="p-2 rounded-xl text-ink-muted hover:text-red-400 hover:bg-elevated active:bg-canvas transition"
                             title="Disconnect account"
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
+                            <Trash2 className="w-4 h-4" />
                           </button>
                         </div>
                       )}
@@ -247,7 +315,7 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
 
                     <div className="space-y-1.5">
                       <div className="flex justify-between text-xs font-mono text-ink-secondary tabular-nums">
-                        <span>{formatBytes(acc.usedBytes)}</span>
+                        <span>{formatBytes(acc.usedBytes)} used</span>
                         <span className="text-ink font-medium">
                           {formatBytes(acc.quotaBytes, 0)}
                         </span>
@@ -268,98 +336,158 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
           )}
         </section>
 
-        {/* Provider Catalog Grid */}
-        <section className="space-y-3.5">
-          <h2 className="text-[11px] font-medium uppercase tracking-wider text-ink-muted px-0.5">
-            Add Free Cloud Storage
-          </h2>
+        {/* Provider Catalog Grid with Quick Mobile Filter Chips */}
+        <section className="space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
+              {(
+                [
+                  {
+                    id: 'all' as CatalogFilter,
+                    label: `All (${vault.providersCatalog.length})`,
+                  },
+                  { id: 'instant' as CatalogFilter, label: '⚡ Instant Sign-In' },
+                  { id: 'connected' as CatalogFilter, label: '✓ Connected' },
+                  { id: 's3' as CatalogFilter, label: 'S3 & Buckets' },
+                ] as const
+              ).map((chip) => {
+                const active = catalogFilter === chip.id;
+                return (
+                  <button
+                    key={chip.id}
+                    type="button"
+                    onClick={() => setCatalogFilter(chip.id)}
+                    className={`shrink-0 px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${
+                      active
+                        ? 'bg-accent-soft border-accent/50 text-ink shadow-card'
+                        : 'bg-surface border-line text-ink-secondary hover:text-ink'
+                    }`}
+                  >
+                    {chip.label}
+                  </button>
+                );
+              })}
+            </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
-            {vault.providersCatalog.map((provider, idx) => {
-              const connectedForProvider = vault.accounts.filter(
-                (a) => a.providerId === provider.id
-              );
-              const count = connectedForProvider.length;
-
-              return (
-                <motion.div
-                  key={provider.id}
-                  initial={{ opacity: 0, y: 12 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.24, delay: Math.min(idx * 0.03, 0.24) }}
-                  whileHover={{ y: -2 }}
-                  className={`rounded-2xl bg-surface hover:bg-elevated/60 border p-5 flex flex-col justify-between gap-4 shadow-card transition-colors ${
-                    count > 0
-                      ? 'border-[#10A37F]/40 hover:border-[#10A37F]/65'
-                      : 'border-line hover:border-line-strong'
-                  }`}
+            <div className="relative w-full sm:w-56">
+              <Search className="w-3.5 h-3.5 text-ink-muted absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="text"
+                value={catalogSearch}
+                onChange={(e) => setCatalogSearch(e.target.value)}
+                placeholder="Filter providers..."
+                className="w-full pl-9 pr-8 py-2 sm:py-1.5 rounded-full bg-surface border border-line focus:border-accent focus:outline-none text-xs text-ink placeholder:text-ink-muted"
+              />
+              {catalogSearch && (
+                <button
+                  type="button"
+                  onClick={() => setCatalogSearch('')}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 text-ink-muted hover:text-ink"
                 >
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <h3 className="text-[14px] font-semibold text-ink flex items-center gap-2">
-                        {provider.name}
-                        {count > 0 && (
-                          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-[#10A37F]/15 border border-[#10A37F]/30 text-[#10A37F]">
-                            ✓ {count === 1 ? 'Connected' : `${count} Connected`}
-                          </span>
-                        )}
-                      </h3>
-                      <span className="text-xs font-mono font-semibold px-2.5 py-0.5 rounded-full bg-accent-soft text-accent">
-                        {provider.freeLabel}
-                      </span>
-                    </div>
-                    <p className="text-xs text-ink-secondary leading-relaxed">
-                      {provider.description}
-                    </p>
-                    {count > 0 && (
-                      <div className="pt-1 space-y-1">
-                        {connectedForProvider.map((acc) => (
-                          <div
-                            key={acc.id}
-                            className="text-[11px] text-[#6EE7B7] bg-[#10A37F]/10 border border-[#10A37F]/20 rounded-xl px-2.5 py-1 truncate"
-                          >
-                            {acc.accountLabel} · {acc.email}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="flex items-center justify-between pt-3 border-t border-line">
-                    {provider.zeroConsole ? (
-                      <span className="text-[11px] text-[#10A37F] inline-flex items-center gap-1 font-medium">
-                        <Zap className="w-3 h-3" /> Instant Sign-In
-                      </span>
-                    ) : (
-                      <a
-                        href={provider.signupUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-[11px] text-ink-muted hover:text-ink inline-flex items-center gap-1 transition"
-                      >
-                        Free Account <ExternalLink className="w-3 h-3" />
-                      </a>
-                    )}
-
-                    <motion.button
-                      whileHover={{ scale: 1.03 }}
-                      whileTap={{ scale: 0.96 }}
-                      disabled={isOffline}
-                      onClick={() => setSelectedProvider(provider)}
-                      className={`px-4 py-1.5 rounded-full text-xs font-semibold inline-flex items-center gap-1 transition disabled:opacity-40 ${
-                        count > 0
-                          ? 'bg-elevated hover:bg-canvas border border-line-strong text-ink'
-                          : 'bg-accent hover:bg-accent-hover text-accent-fg shadow-glow'
-                      }`}
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                      {count > 0 ? 'Add Another' : 'Connect'}
-                    </motion.button>
-                  </div>
-                </motion.div>
-              );
-            })}
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
           </div>
+
+          {filteredProviders.length === 0 ? (
+            <div className="rounded-2xl border border-line bg-surface/50 p-8 text-center text-xs text-ink-muted">
+              No cloud providers match this filter.
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-3.5">
+              {filteredProviders.map((provider, idx) => {
+                const connectedForProvider = vault.accounts.filter(
+                  (a) => a.providerId === provider.id
+                );
+                const count = connectedForProvider.length;
+
+                return (
+                  <motion.div
+                    key={provider.id}
+                    initial={{ opacity: 0, y: 12 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{
+                      duration: 0.24,
+                      delay: Math.min(idx * 0.03, 0.24),
+                    }}
+                    whileHover={{ y: -2 }}
+                    className={`rounded-2xl bg-surface hover:bg-elevated/60 border p-4 sm:p-5 flex flex-col justify-between gap-4 shadow-card transition-colors ${
+                      count > 0
+                        ? 'border-[#10A37F]/40 hover:border-[#10A37F]/65'
+                        : 'border-line hover:border-line-strong'
+                    }`}
+                  >
+                    <div className="space-y-2">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0 space-y-1">
+                          <h3 className="text-[14px] font-semibold text-ink leading-snug">
+                            {provider.name}
+                          </h3>
+                          {count > 0 && (
+                            <span className="inline-flex items-center text-[10px] font-semibold px-2 py-0.5 rounded-full bg-[#10A37F]/15 border border-[#10A37F]/30 text-[#10A37F]">
+                              ✓ {count === 1 ? 'Connected' : `${count} Connected`}
+                            </span>
+                          )}
+                        </div>
+                        <span className="shrink-0 text-xs font-mono font-semibold px-2.5 py-0.5 rounded-full bg-accent-soft text-accent">
+                          {provider.freeLabel}
+                        </span>
+                      </div>
+                      <p className="text-xs text-ink-secondary leading-relaxed">
+                        {provider.description}
+                      </p>
+                      {count > 0 && (
+                        <div className="pt-1 space-y-1">
+                          {connectedForProvider.map((acc) => (
+                            <div
+                              key={acc.id}
+                              className="text-[11px] text-[#6EE7B7] bg-[#10A37F]/10 border border-[#10A37F]/20 rounded-xl px-2.5 py-1 truncate"
+                            >
+                              {acc.accountLabel} · {acc.email}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2 pt-3 border-t border-line">
+                      {provider.zeroConsole ? (
+                        <span className="text-[11px] text-[#10A37F] inline-flex items-center gap-1 font-medium">
+                          <Zap className="w-3 h-3 shrink-0" /> Instant Sign-In
+                        </span>
+                      ) : (
+                        <a
+                          href={provider.signupUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-[11px] text-ink-muted hover:text-ink inline-flex items-center gap-1 transition"
+                        >
+                          Free Account <ExternalLink className="w-3 h-3 shrink-0" />
+                        </a>
+                      )}
+
+                      <motion.button
+                        type="button"
+                        whileHover={{ scale: 1.03 }}
+                        whileTap={{ scale: 0.96 }}
+                        disabled={isOffline}
+                        onClick={() => setSelectedProvider(provider)}
+                        className={`px-4 py-2 sm:py-1.5 rounded-full text-xs font-semibold inline-flex items-center gap-1 transition disabled:opacity-40 ${
+                          count > 0
+                            ? 'bg-elevated hover:bg-canvas border border-line-strong text-ink'
+                            : 'bg-accent hover:bg-accent-hover text-accent-fg shadow-glow'
+                        }`}
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>{count > 0 ? 'Add Another' : 'Connect'}</span>
+                      </motion.button>
+                    </div>
+                  </motion.div>
+                );
+              })}
+            </div>
+          )}
         </section>
       </div>
 
@@ -376,7 +504,7 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
         onConnectedRefresh={onConnectedRefresh}
       />
 
-      {/* Spring rclone.conf Modal */}
+      {/* Responsive Bottom-Sheet / Dialog: rclone.conf Modal */}
       <AnimatePresence>
         {showRcloneModal && (
           <motion.div
@@ -384,17 +512,18 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             onClick={() => setShowRcloneModal(false)}
-            className="fixed inset-0 z-50 bg-black/65 backdrop-blur-md flex items-center justify-center p-4"
+            className="fixed inset-0 z-50 bg-black/65 backdrop-blur-md flex items-end sm:items-center justify-center p-0 sm:p-4"
           >
             <motion.form
-              initial={{ opacity: 0, scale: 0.95, y: 12 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.96, y: 10 }}
-              transition={{ type: 'spring', stiffness: 420, damping: 30 }}
+              initial={{ opacity: 0, y: 28, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 24, scale: 0.98 }}
+              transition={{ type: 'spring', stiffness: 420, damping: 32 }}
               onClick={(e) => e.stopPropagation()}
               onSubmit={handleImportRclone}
-              className="w-full max-w-md rounded-3xl bg-surface border border-line-strong p-6 space-y-4 shadow-float"
+              className="w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl bg-surface border-t sm:border border-line-strong p-5 sm:p-6 pb-[max(1.5rem,env(safe-area-inset-bottom,0px))] sm:pb-6 space-y-4 shadow-float max-h-[92dvh] overflow-y-auto"
             >
+              <div className="w-10 h-1 rounded-full bg-line-strong mx-auto sm:hidden" />
               <div className="flex items-center justify-between">
                 <div>
                   <div className="text-[11px] font-medium text-accent">

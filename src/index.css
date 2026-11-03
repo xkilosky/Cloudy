@@ -8,8 +8,8 @@
   --bg-canvas: #171920;
   --bg-surface: #20232c;
   --bg-elevated: #282c37;
-  --border-subtle: rgba(255, 255, 255, 0.07);
-  --border-strong: rgba(255, 255, 255, 0.13);
+  --border-subtle: rgba(255, 255, 255, 0.075);
+  --border-strong: rgba(255, 255, 255, 0.14);
   --text-primary: #eceef2;
   --text-secondary: #a0a6b5;
   --text-muted: #6c7385;
@@ -25,8 +25,8 @@
   --bg-canvas: #201f1d;
   --bg-surface: #292724;
   --bg-elevated: #33302c;
-  --border-subtle: rgba(245, 238, 228, 0.08);
-  --border-strong: rgba(245, 238, 228, 0.14);
+  --border-subtle: rgba(245, 238, 228, 0.085);
+  --border-strong: rgba(245, 238, 228, 0.15);
   --text-primary: #f3efea;
   --text-secondary: #b4aea3;
   --text-muted: #7e7970;
@@ -42,8 +42,8 @@
   --bg-canvas: #212121;
   --bg-surface: #2a2a2a;
   --bg-elevated: #333333;
-  --border-subtle: rgba(255, 255, 255, 0.08);
-  --border-strong: rgba(255, 255, 255, 0.14);
+  --border-subtle: rgba(255, 255, 255, 0.085);
+  --border-strong: rgba(255, 255, 255, 0.15);
   --text-primary: #ececec;
   --text-secondary: #b4b4b4;
   --text-muted: #7c7c7c;
@@ -59,8 +59,8 @@
   --bg-canvas: #1a1924;
   --bg-surface: #232230;
   --bg-elevated: #2d2b3e;
-  --border-subtle: rgba(255, 255, 255, 0.08);
-  --border-strong: rgba(255, 255, 255, 0.14);
+  --border-subtle: rgba(255, 255, 255, 0.085);
+  --border-strong: rgba(255, 255, 255, 0.15);
   --text-primary: #f0eff7;
   --text-secondary: #a8a5bd;
   --text-muted: #74708b;
@@ -72,13 +72,37 @@
 }
 
 @layer base {
-  html,
+  html {
+    height: 100%;
+    overflow-x: clip;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-text-size-adjust: 100%;
+  }
+
   body,
   #root {
-    height: 100%;
+    min-height: 100%;
+    min-height: 100dvh;
+    overflow-x: clip;
     background-color: var(--bg-canvas);
     color: var(--text-primary);
-    transition: background-color 260ms ease, color 260ms ease;
+    transition: background-color 240ms ease, color 240ms ease;
+  }
+
+  button,
+  a,
+  select,
+  summary {
+    touch-action: manipulation;
+  }
+
+  /* Prevent mobile browsers (iOS Safari / Android WebView) from auto-zooming on input focus */
+  @media (max-width: 639px) {
+    input:not([type='checkbox']):not([type='radio']),
+    textarea,
+    select {
+      font-size: 16px !important;
+    }
   }
 
   ::selection {
@@ -113,9 +137,26 @@
 @layer utilities {
   .ambient-canvas {
     background-image: radial-gradient(
-      ellipse 80% 45% at 50% -15%,
+      ellipse 85% 42% at 50% -12%,
       var(--accent-soft),
-      transparent 70%
+      transparent 72%
     );
+  }
+
+  .pt-safe {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
   }
 }
