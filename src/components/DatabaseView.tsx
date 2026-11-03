@@ -199,28 +199,38 @@ export const DatabaseView: React.FC<DatabaseViewProps> = ({
     }
   }, [authUser]);
 
-  const loadOverview = useCallback(async () => {
+  const vaultRef = React.useRef(vault);
+  vaultRef.current = vault;
+  const authUserRef = React.useRef(authUser);
+  authUserRef.current = authUser;
+
+  const vaultSummaryKey = `${vault.vaultId || ''}:${vault.accounts.length}:${vault.folders.length}:${vault.files.length}:${vault.apiKeys.length}`;
+
+  const loadOverview = useCallback(async (isInitial = false) => {
+    const curVault = vaultRef.current;
+    const curUser = authUserRef.current;
     if (isOffline) {
-      setOverview(buildOfflineFallbackOverview(vault, authUser));
+      setOverview(buildOfflineFallbackOverview(curVault, curUser));
       setLoading(false);
       return;
     }
     try {
-      setLoading(true);
+      if (isInitial) setLoading(true);
       const res = await apiFetch('/api/database/overview');
       if (!res.ok) throw new Error('Failed to load database overview');
       const data = (await res.json()) as DatabaseOverview;
       setOverview(data);
     } catch {
-      setOverview(buildOfflineFallbackOverview(vault, authUser));
+      setOverview(buildOfflineFallbackOverview(curVault, curUser));
     } finally {
       setLoading(false);
     }
-  }, [isOffline, vault, authUser]);
+  }, [isOffline]);
 
   useEffect(() => {
-    loadOverview();
-  }, [loadOverview]);
+    loadOverview(overview === null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadOverview, vaultSummaryKey, authUser?.id]);
 
   const handleSyncDatabase = async () => {
     if (isOffline) {

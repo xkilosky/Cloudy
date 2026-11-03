@@ -236,6 +236,19 @@ export async function createUserRecord({ email, displayName, passwordHash, vault
   return savedRow;
 }
 
+// Fast in-memory auth cache (eliminates 2 serial DB round-trips per API call on warm instances)
+const SESSION_AUTH_CACHE_TTL_MS = 15_000;
+const sessionAuthCache = new Map();
+
+function invalidateUserAuthCache(userId) {
+  if (!userId) return;
+  for (const [hash, entry] of sessionAuthCache.entries()) {
+    if (entry?.user?.id === userId) {
+      sessionAuthCache.delete(hash);
+    }
+  }
+}
+
 export async function updateUserRecord(userId, patch) {
   const now = new Date().toISOString();
   const dbPatch = { ...patch, updated_at: now };
@@ -257,6 +270,7 @@ export async function updateUserRecord(userId, patch) {
     updated = users[idx];
     writeLocalTable(LOCAL_USERS_FILE, users);
   }
+  invalidateUserAuthCache(userId);
   return updated;
 }
 
@@ -409,13 +423,30 @@ export async function resolveAuthSession(req) {
   if (!claims) return null;
 
   const tokenHash = sha256Hex(token);
+  const nowMs = Date.now();
+  const cached = sessionAuthCache.get(tokenHash);
+  if (
+    cached &&
+    nowMs - cached.cachedAt < SESSION_AUTH_CACHE_TTL_MS &&
+    new Date(cached.session.expires_at).getTime() > nowMs
+  ) {
+    return {
+      token,
+      session: cached.session,
+      user: cached.user,
+    };
+  }
+
   const sb = await sbRest(
     `cloudy_sessions?token_hash=eq.${encodeURIComponent(tokenHash)}&select=*&limit=1`
   );
   let sessionRow = null;
   if (sb.ok && Array.isArray(sb.data)) {
     sessionRow = sb.data[0] || null;
-    if (!sessionRow) return null; // Revoked or logged out in Postgres
+    if (!sessionRow) {
+      sessionAuthCache.delete(tokenHash);
+      return null; // Revoked or logged out in Postgres
+    }
     mirrorSessionLocally(sessionRow);
   } else {
     const localSessions = readLocalTable(LOCAL_SESSIONS_FILE);
@@ -423,12 +454,19 @@ export async function resolveAuthSession(req) {
     if (!sessionRow) return null;
   }
 
-  if (new Date(sessionRow.expires_at).getTime() <= Date.now()) {
+  if (new Date(sessionRow.expires_at).getTime() <= nowMs) {
+    sessionAuthCache.delete(tokenHash);
     return null;
   }
 
   const userRow = await findUserById(claims.uid);
   if (!userRow) return null;
+
+  sessionAuthCache.set(tokenHash, {
+    session: sessionRow,
+    user: userRow,
+    cachedAt: nowMs,
+  });
 
   return {
     token,
@@ -440,6 +478,7 @@ export async function resolveAuthSession(req) {
 export async function revokeSessionByToken(token) {
   if (!token) return;
   const tokenHash = sha256Hex(token);
+  sessionAuthCache.delete(tokenHash);
   await sbRest(`cloudy_sessions?token_hash=eq.${encodeURIComponent(tokenHash)}`, {
     method: 'DELETE',
   });
@@ -451,6 +490,7 @@ export async function revokeSessionByToken(token) {
 
 export async function revokeSessionByIdForUser(sessionId, userId) {
   if (!sessionId || !userId) return;
+  invalidateUserAuthCache(userId);
   await sbRest(
     `cloudy_sessions?id=eq.${encodeURIComponent(sessionId)}&user_id=eq.${encodeURIComponent(userId)}`,
     { method: 'DELETE' }
@@ -485,9 +525,35 @@ export async function listSessionsForUser(userId, currentSessionId = null) {
     }));
 }
 
-// --- Normalized Relational PostgreSQL Table Sync ---
-async function syncSingleRelationalTable(tableName, vaultId, rows) {
+// --- Normalized Relational PostgreSQL Table Sync (Differential & Fast) ---
+const relationalTableDigestCache = new Map();
+const relationalTableKnownIdsCache = new Map();
+
+function computeRowsDigest(rows) {
+  const stable = rows.map((r) => {
+    const copy = { ...r };
+    delete copy.updated_at;
+    return copy;
+  });
+  return sha256Hex(JSON.stringify(stable));
+}
+
+async function syncSingleRelationalTable(
+  tableName,
+  vaultId,
+  rows,
+  forceFullSync = false
+) {
   if (!hasSupabaseEnv() || Date.now() < sbUnavailableUntil) return;
+
+  const cacheKey = `${vaultId}:${tableName}`;
+  const nextDigest = computeRowsDigest(rows);
+  const prevDigest = relationalTableDigestCache.get(cacheKey);
+  const prevKnownIds = relationalTableKnownIdsCache.get(cacheKey);
+
+  if (!forceFullSync && prevDigest === nextDigest && prevKnownIds) {
+    return;
+  }
 
   if (rows.length > 0) {
     await sbRest(`${tableName}?on_conflict=vault_id,id`, {
@@ -497,25 +563,44 @@ async function syncSingleRelationalTable(tableName, vaultId, rows) {
     });
   }
 
-  const existingRes = await sbRest(
-    `${tableName}?vault_id=eq.${encodeURIComponent(vaultId)}&select=id`
-  );
-  if (existingRes.ok && Array.isArray(existingRes.data)) {
-    const keepIds = new Set(rows.map((r) => r.id));
-    const staleIds = existingRes.data
-      .map((r) => r.id)
-      .filter((id) => id && !keepIds.has(id));
+  const keepIds = new Set(rows.map((r) => r.id));
+
+  if (!forceFullSync && prevKnownIds) {
+    const staleIds = [...prevKnownIds].filter((id) => id && !keepIds.has(id));
     if (staleIds.length > 0) {
-      const inList = staleIds.map((id) => `"${String(id).replace(/"/g, '')}"`).join(',');
+      const inList = staleIds
+        .map((id) => `"${String(id).replace(/"/g, '')}"`)
+        .join(',');
       await sbRest(
         `${tableName}?vault_id=eq.${encodeURIComponent(vaultId)}&id=in.(${encodeURIComponent(inList)})`,
         { method: 'DELETE' }
       );
     }
+  } else {
+    const existingRes = await sbRest(
+      `${tableName}?vault_id=eq.${encodeURIComponent(vaultId)}&select=id`
+    );
+    if (existingRes.ok && Array.isArray(existingRes.data)) {
+      const staleIds = existingRes.data
+        .map((r) => r.id)
+        .filter((id) => id && !keepIds.has(id));
+      if (staleIds.length > 0) {
+        const inList = staleIds
+          .map((id) => `"${String(id).replace(/"/g, '')}"`)
+          .join(',');
+        await sbRest(
+          `${tableName}?vault_id=eq.${encodeURIComponent(vaultId)}&id=in.(${encodeURIComponent(inList)})`,
+          { method: 'DELETE' }
+        );
+      }
+    }
   }
+
+  relationalTableDigestCache.set(cacheKey, nextDigest);
+  relationalTableKnownIdsCache.set(cacheKey, keepIds);
 }
 
-export async function syncVaultRelationalTables(vaultId, db) {
+export async function syncVaultRelationalTables(vaultId, db, forceFullSync = false) {
   if (!db || !hasSupabaseEnv() || Date.now() < sbUnavailableUntil) return;
   const userId = db.ownerUserId || null;
   const now = new Date().toISOString();
@@ -594,10 +679,15 @@ export async function syncVaultRelationalTables(vaultId, db) {
   }));
 
   await Promise.allSettled([
-    syncSingleRelationalTable('cloudy_storage_accounts', vaultId, accountRows),
-    syncSingleRelationalTable('cloudy_folders', vaultId, folderRows),
-    syncSingleRelationalTable('cloudy_files', vaultId, fileRows),
-    syncSingleRelationalTable('cloudy_ai_keys', vaultId, keyRows),
+    syncSingleRelationalTable(
+      'cloudy_storage_accounts',
+      vaultId,
+      accountRows,
+      forceFullSync
+    ),
+    syncSingleRelationalTable('cloudy_folders', vaultId, folderRows, forceFullSync),
+    syncSingleRelationalTable('cloudy_files', vaultId, fileRows, forceFullSync),
+    syncSingleRelationalTable('cloudy_ai_keys', vaultId, keyRows, forceFullSync),
   ]);
 }
 

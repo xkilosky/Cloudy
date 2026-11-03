@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   FolderClosed,
@@ -28,7 +28,7 @@ import {
   AndroidView,
   type BeforeInstallPromptEvent,
 } from './components/AndroidView';
-import { syncVaultState } from './lib/syncEngine';
+import { syncVaultState, sanitizeOfflineSnapshot } from './lib/syncEngine';
 import {
   apiFetch,
   getCachedAuthUser,
@@ -50,6 +50,8 @@ import {
   getOfflineBlob,
   enqueueOfflineAction,
   clearAllOfflineStores,
+  loadOfflineSnapshot,
+  computeVaultFingerprint,
 } from './lib/offlineDb';
 
 export function App() {
@@ -57,7 +59,12 @@ export function App() {
     getCachedAuthUser()
   );
   const [guestMode, setGuestMode] = useState<boolean>(() => isGuestModeEnabled());
-  const [authReady, setAuthReady] = useState<boolean>(() => !navigator.onLine);
+  const [authReady, setAuthReady] = useState<boolean>(
+    () =>
+      !navigator.onLine ||
+      Boolean(getCachedAuthUser()) ||
+      isGuestModeEnabled()
+  );
   const [vault, setVault] = useState<VaultState | null>(null);
   const [theme, setTheme] = useState<StudioTheme>(() => getSavedTheme());
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -89,6 +96,14 @@ export function App() {
   const [swReady, setSwReady] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
+  // Serialize online write mutations so rapid taps never race across serverless instances
+  const mutationChainRef = useRef<Promise<unknown>>(Promise.resolve());
+  const enqueueServerMutation = useCallback(<T,>(task: () => Promise<T>): Promise<T> => {
+    const next = mutationChainRef.current.catch(() => {}).then(task);
+    mutationChainRef.current = next;
+    return next;
+  }, []);
+
   const canLoadWorkspace = authReady && (Boolean(authUser) || guestMode);
 
   useEffect(() => {
@@ -112,7 +127,25 @@ export function App() {
     setTimeout(() => setToast((curr) => (curr === msg ? null : curr)), 3200);
   }, []);
 
-  // Verify active user session on boot
+  // Instant IndexedDB hydration on launch so returning users see files in <30ms
+  useEffect(() => {
+    if (!canLoadWorkspace || vault) return;
+    let cancelled = false;
+    loadOfflineSnapshot()
+      .then((snap) => {
+        if (cancelled || !snap) return;
+        const expectedVid =
+          authUser?.vaultId || localStorage.getItem('cloudy_xkilo_vault_id');
+        if (snap.vaultId && expectedVid && snap.vaultId !== expectedVid) return;
+        setVault((prev) => prev || sanitizeOfflineSnapshot(snap));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [canLoadWorkspace, authUser?.vaultId, vault]);
+
+  // Verify active user session on boot (non-blocking if cached session exists)
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -135,7 +168,9 @@ export function App() {
         } else {
           clearAuthSession();
           setAuthUser(null);
-          setGuestMode(isGuestModeEnabled());
+          const guest = isGuestModeEnabled();
+          setGuestMode(guest);
+          if (!guest) setVault(null);
         }
       } catch {
         // Offline or unreachable — retain cached authUser for Offline Vault continuity
@@ -163,7 +198,16 @@ export function App() {
           setIsSyncing(true);
         }
         const res = await syncVaultState(useOffline, forceFresh);
-        setVault(res.state);
+        setVault((prev) => {
+          if (
+            prev &&
+            silentBackground &&
+            computeVaultFingerprint(prev) === computeVaultFingerprint(res.state)
+          ) {
+            return prev;
+          }
+          return res.state;
+        });
         setIsOffline(res.isOffline);
         setPendingSyncCount(res.pendingQueueCount);
         if (res.flushedQueueCount > 0) {
@@ -190,7 +234,6 @@ export function App() {
           setVault(null);
           return;
         }
-        console.error('Vault sync error:', err);
       } finally {
         setIsSyncing(false);
       }
@@ -214,8 +257,9 @@ export function App() {
       );
       return;
     }
-    refreshVault(undefined, false, true);
-  }, [canLoadWorkspace, refreshVault, authUser?.id, showToast]);
+    refreshVault(undefined, Boolean(vault), true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canLoadWorkspace, authUser?.id]);
 
   useEffect(() => {
     const handleOnline = () => {
@@ -237,7 +281,7 @@ export function App() {
         navigator.onLine &&
         document.visibilityState === 'visible'
       ) {
-        refreshVault(false, true, true);
+        refreshVault(false, true, false);
       }
     };
     const handleOAuthSuccessPayload = (accountLabel?: string) => {
@@ -281,7 +325,7 @@ export function App() {
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
     window.addEventListener('focus', handleFocusOrVisible);
-    document.addEventListener('visibilitychange', handleFocusOrVisible);
+    window.addEventListener('visibilitychange', handleFocusOrVisible);
     window.addEventListener('message', handleMessage);
     window.addEventListener('storage', handleStorage);
     window.addEventListener('beforeinstallprompt', handleBeforeInstall);
@@ -301,7 +345,7 @@ export function App() {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
       window.removeEventListener('focus', handleFocusOrVisible);
-      document.removeEventListener('visibilitychange', handleFocusOrVisible);
+      window.removeEventListener('visibilitychange', handleFocusOrVisible);
       window.removeEventListener('message', handleMessage);
       window.removeEventListener('storage', handleStorage);
       window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
@@ -312,7 +356,7 @@ export function App() {
   useEffect(() => {
     if (!canLoadWorkspace || simulatedOffline) return;
 
-    const intervalMs = isOffline ? 8000 : 15000;
+    const intervalMs = isOffline ? 10000 : 20000;
     const timer = window.setInterval(() => {
       if (!navigator.onLine) return;
       if (!isOffline && document.visibilityState !== 'visible') return;
@@ -330,30 +374,57 @@ export function App() {
   };
 
   const handleCreateFolder = async (name: string, parentId: string | null) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+
+    // Instant client-side guard against rapid duplicate carpeta creation
+    const existingRecent = vault?.folders.find(
+      (f) =>
+        !f.trashed &&
+        (f.parentId || null) === (parentId || null) &&
+        f.name.trim().toLowerCase() === trimmed.toLowerCase() &&
+        Date.now() - new Date(f.createdAt || 0).getTime() < 5000
+    );
+    if (existingRecent) return;
+
     const clientFolderId = `fld_${Math.random().toString(36).slice(2, 11)}`;
     const now = new Date().toISOString();
+    const optimisticFolder: FolderItem = {
+      id: clientFolderId,
+      name: trimmed,
+      parentId: parentId || null,
+      offlinePinned: true,
+      starred: false,
+      trashed: false,
+      pendingOfflineSync: isOffline,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    // 0ms Optimistic UI update
+    setVault((prev) =>
+      prev ? { ...prev, folders: [optimisticFolder, ...prev.folders] } : prev
+    );
 
     const saveFolderOffline = async () => {
       const offlineFolder: FolderItem = {
-        id: clientFolderId,
-        name,
-        parentId,
-        offlinePinned: true,
-        starred: false,
-        trashed: false,
+        ...optimisticFolder,
         pendingOfflineSync: true,
-        createdAt: now,
-        updatedAt: now,
       };
       await putStoreItem('folders', offlineFolder);
       await enqueueOfflineAction({
         id: `q_${Date.now()}_${clientFolderId}`,
         type: 'create_folder',
-        payload: { id: clientFolderId, name, parentId, offlinePinned: true },
+        payload: {
+          id: clientFolderId,
+          name: trimmed,
+          parentId: parentId || null,
+          offlinePinned: true,
+        },
         createdAt: now,
       });
-      await refreshVault(true);
-      showToast(`Created "${name}" offline`);
+      await refreshVault(true, true);
+      showToast(`Created "${trimmed}" offline`);
     };
 
     if (isOffline && vault) {
@@ -362,18 +433,42 @@ export function App() {
     }
 
     try {
-      const res = await apiFetch('/api/folders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: clientFolderId, name, parentId }),
+      await enqueueServerMutation(async () => {
+        const res = await apiFetch('/api/folders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: clientFolderId,
+            name: trimmed,
+            parentId: parentId || null,
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          setVault((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  folders: prev.folders.filter((f) => f.id !== clientFolderId),
+                }
+              : prev
+          );
+          showToast(err.error || 'Failed to create carpeta');
+          return;
+        }
+        const data = await res.json().catch(() => null);
+        if (data?.folder) {
+          await putStoreItem('folders', data.folder).catch(() => {});
+          setVault((prev) => {
+            if (!prev) return prev;
+            const filtered = prev.folders.filter(
+              (f) => f.id !== clientFolderId && f.id !== data.folder.id
+            );
+            return { ...prev, folders: [data.folder, ...filtered] };
+          });
+        }
+        showToast(`Created "${trimmed}"`);
       });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        showToast(err.error || 'Failed to create folder');
-        return;
-      }
-      await refreshVault();
-      showToast(`Created "${name}"`);
     } catch {
       await saveFolderOffline();
     }
@@ -442,10 +537,12 @@ export function App() {
     if (folderId) fd.append('folderId', folderId);
 
     try {
-      const res = await apiFetch('/api/files/upload', {
-        method: 'POST',
-        body: fd,
-      });
+      const res = await enqueueServerMutation(() =>
+        apiFetch('/api/files/upload', {
+          method: 'POST',
+          body: fd,
+        })
+      );
       const data = await res.json();
       if (!res.ok) {
         if (data.code === 'NO_CLOUD_ACCOUNT') {
@@ -456,7 +553,7 @@ export function App() {
         showToast(`Upload failed: ${data.error || 'Error'}`);
         return;
       }
-      await refreshVault();
+      await refreshVault(false, true, true);
       const dest = data.files?.[0]?.providerName || 'Cloud';
       showToast(`Uploaded to ${dest}`);
     } catch {
@@ -473,40 +570,47 @@ export function App() {
   ) => {
     const id = `fil_${Math.random().toString(36).slice(2, 11)}`;
     const now = new Date().toISOString();
+    const blob = new Blob([content], { type: mimeType });
+    const targetAcc = vault?.accounts[0] || null;
+
+    const optimisticFile: FileItem = {
+      id,
+      name,
+      folderId,
+      mimeType,
+      kind,
+      size: blob.size,
+      accountId: targetAcc ? targetAcc.id : 'offline_vault',
+      providerId: targetAcc ? targetAcc.providerId : 'offline_vault',
+      providerName: targetAcc ? targetAcc.providerName : 'Offline Vault',
+      mirrorAccountId: null,
+      offlinePinned: true,
+      offlineCached: true,
+      pendingOfflineSync: isOffline,
+      starred: false,
+      trashed: false,
+      tags: [],
+      textContent: content,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    // 0ms Optimistic UI update
+    setVault((prev) =>
+      prev ? { ...prev, files: [optimisticFile, ...prev.files] } : prev
+    );
+    saveOfflineBlob(id, blob, now).catch(() => {});
 
     const saveNoteOffline = async () => {
-      const blob = new Blob([content], { type: mimeType });
-      const targetAcc = vault?.accounts[0] || null;
-      const item: FileItem = {
-        id,
-        name,
-        folderId,
-        mimeType,
-        kind,
-        size: blob.size,
-        accountId: targetAcc ? targetAcc.id : 'offline_vault',
-        providerId: targetAcc ? targetAcc.providerId : 'offline_vault',
-        providerName: targetAcc ? targetAcc.providerName : 'Offline Vault',
-        mirrorAccountId: null,
-        offlinePinned: true,
-        offlineCached: true,
-        pendingOfflineSync: true,
-        starred: false,
-        trashed: false,
-        tags: [],
-        textContent: content,
-        createdAt: now,
-        updatedAt: now,
-      };
+      const item: FileItem = { ...optimisticFile, pendingOfflineSync: true };
       await putStoreItem('files', item);
-      await saveOfflineBlob(id, blob, now);
       await enqueueOfflineAction({
         id: `q_${Date.now()}_${id}`,
         type: 'create_note',
         payload: { id, name, content, mimeType, kind, folderId },
         createdAt: now,
       });
-      await refreshVault(true);
+      await refreshVault(true, true);
       showToast(`Saved "${name}" offline`);
     };
 
@@ -516,18 +620,32 @@ export function App() {
     }
 
     try {
-      const res = await apiFetch('/api/files/note', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, name, content, mimeType, kind, folderId }),
+      await enqueueServerMutation(async () => {
+        const res = await apiFetch('/api/files/note', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, name, content, mimeType, kind, folderId }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setVault((prev) =>
+            prev ? { ...prev, files: prev.files.filter((f) => f.id !== id) } : prev
+          );
+          showToast(`Save error: ${data.error || 'Error'}`);
+          return;
+        }
+        if (data.file) {
+          await putStoreItem('files', data.file).catch(() => {});
+          setVault((prev) => {
+            if (!prev) return prev;
+            const rest = prev.files.filter(
+              (f) => f.id !== id && f.id !== data.file.id
+            );
+            return { ...prev, files: [data.file, ...rest] };
+          });
+        }
+        showToast(`Saved "${name}" → ${data.file?.providerName || 'Vault'}`);
       });
-      const data = await res.json();
-      if (!res.ok) {
-        showToast(`Save error: ${data.error || 'Error'}`);
-        return;
-      }
-      await refreshVault();
-      showToast(`Saved "${name}" → ${data.file?.providerName || 'Vault'}`);
     } catch {
       await saveNoteOffline();
     }
@@ -539,13 +657,28 @@ export function App() {
       type: file.mimeType || 'text/plain',
     });
 
+    const optimisticUpdated: FileItem = {
+      ...file,
+      textContent: updatedText,
+      size: blob.size,
+      updatedAt: now,
+    };
+    setPreviewFile(optimisticUpdated);
+    setVault((prev) =>
+      prev
+        ? {
+            ...prev,
+            files: prev.files.map((f) =>
+              f.id === file.id ? optimisticUpdated : f
+            ),
+          }
+        : prev
+    );
+
     const saveEditOffline = async () => {
       const updated: FileItem = {
-        ...file,
-        textContent: updatedText,
-        size: blob.size,
+        ...optimisticUpdated,
         pendingOfflineSync: true,
-        updatedAt: now,
       };
       await putStoreItem('files', updated);
       await saveOfflineBlob(file.id, blob, now);
@@ -556,7 +689,7 @@ export function App() {
         createdAt: now,
       });
       setPreviewFile(updated);
-      await refreshVault(true);
+      await refreshVault(true, true);
       showToast('Saved offline');
     };
 
@@ -566,58 +699,89 @@ export function App() {
     }
 
     try {
-      const res = await apiFetch(`/api/files/${file.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ textContent: updatedText }),
+      await enqueueServerMutation(async () => {
+        const res = await apiFetch(`/api/files/${file.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ textContent: updatedText }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          await saveOfflineBlob(file.id, blob, data.file.updatedAt);
+          await putStoreItem('files', data.file).catch(() => {});
+          setPreviewFile(data.file);
+          setVault((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  files: prev.files.map((f) =>
+                    f.id === file.id ? data.file : f
+                  ),
+                }
+              : prev
+          );
+          showToast('Saved changes');
+        } else {
+          const err = await res.json().catch(() => ({}));
+          showToast(`Save error: ${err.error || 'Failed to save'}`);
+        }
       });
-      if (res.ok) {
-        const data = await res.json();
-        await saveOfflineBlob(file.id, blob, data.file.updatedAt);
-        setPreviewFile(data.file);
-        await refreshVault();
-        showToast('Saved changes');
-      } else {
-        const err = await res.json().catch(() => ({}));
-        showToast(`Save error: ${err.error || 'Failed to save'}`);
-      }
     } catch {
       await saveEditOffline();
     }
   };
 
   const handleDownloadFile = async (file: FileItem) => {
-    const cached = await getOfflineBlob(file.id);
-    if (cached?.blob) {
-      const url = URL.createObjectURL(cached.blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = file.name;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-      return;
-    }
-    if (file.textContent != null) {
-      const b = new Blob([file.textContent], {
-        type: file.mimeType || 'text/plain',
-      });
-      const url = URL.createObjectURL(b);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = file.name;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-      return;
-    }
-    const resp = await apiFetch(`/api/files/${file.id}/blob?download=1`);
-    if (resp.ok) {
-      const b = await resp.blob();
-      const url = URL.createObjectURL(b);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = file.name;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    try {
+      const cached = await getOfflineBlob(file.id);
+      if (cached?.blob) {
+        const url = URL.createObjectURL(cached.blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = file.name;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        return;
+      }
+      if (file.textContent != null) {
+        const b = new Blob([file.textContent], {
+          type: file.mimeType || 'text/plain',
+        });
+        const url = URL.createObjectURL(b);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = file.name;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        return;
+      }
+      if (isOffline) {
+        showToast('Connect to the internet once to download this cloud file');
+        return;
+      }
+      const resp = await apiFetch(`/api/files/${file.id}/blob?download=1`);
+      if (resp.ok) {
+        const b = await resp.blob();
+        saveOfflineBlob(file.id, b, file.updatedAt).catch(() => {});
+        const url = URL.createObjectURL(b);
+        const a = document.createElement('a');
+        a.href = url;
+        const ct = resp.headers.get('content-type') || '';
+        const dlName =
+          file.mimeType.startsWith('application/vnd.google-apps.') &&
+          ct.includes('pdf') &&
+          !file.name.toLowerCase().endsWith('.pdf')
+            ? `${file.name}.pdf`
+            : file.name;
+        a.download = dlName;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } else {
+        const err = await resp.json().catch(() => ({}));
+        showToast(err.error || 'Unable to download file from cloud provider');
+      }
+    } catch {
+      showToast('Download interrupted — check your connection');
     }
   };
 
@@ -625,6 +789,39 @@ export function App() {
     fileId: string,
     body: Record<string, unknown>
   ) => {
+    const now = new Date().toISOString();
+
+    // 0ms Optimistic UI update for local metadata changes
+    if (!body.targetAccountId) {
+      setVault((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          files: prev.files.map((f) => {
+            if (f.id !== fileId) return f;
+            const next: FileItem = {
+              ...f,
+              ...(typeof body.name === 'string' ? { name: body.name } : {}),
+              ...(body.folderId !== undefined
+                ? { folderId: (body.folderId as string | null) || null }
+                : {}),
+              ...(typeof body.trashed === 'boolean'
+                ? { trashed: body.trashed }
+                : {}),
+              ...(typeof body.starred === 'boolean'
+                ? { starred: body.starred }
+                : {}),
+              updatedAt: now,
+            };
+            if (previewFile?.id === fileId) {
+              setPreviewFile(next);
+            }
+            return next;
+          }),
+        };
+      });
+    }
+
     const patchFileOffline = async () => {
       if (!vault) return;
       if (body.targetAccountId) {
@@ -633,7 +830,6 @@ export function App() {
       }
       const existing = vault.files.find((f) => f.id === fileId);
       if (!existing) return;
-      const now = new Date().toISOString();
       const updated: FileItem = {
         ...existing,
         ...(typeof body.name === 'string' ? { name: body.name } : {}),
@@ -653,7 +849,7 @@ export function App() {
         createdAt: now,
       });
       if (previewFile?.id === fileId) setPreviewFile(updated);
-      await refreshVault(true);
+      await refreshVault(true, true);
     };
 
     if (isOffline && vault) {
@@ -662,67 +858,126 @@ export function App() {
     }
 
     try {
-      const res = await apiFetch(`/api/files/${fileId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+      await enqueueServerMutation(async () => {
+        const res = await apiFetch(`/api/files/${fileId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.file) {
+            await putStoreItem('files', data.file).catch(() => {});
+            if (previewFile?.id === fileId) setPreviewFile(data.file);
+            setVault((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    files: prev.files.map((f) =>
+                      f.id === fileId ? data.file : f
+                    ),
+                  }
+                : prev
+            );
+          }
+          if (body.targetAccountId) {
+            await refreshVault(false, true, true);
+          }
+        } else {
+          const err = await res.json().catch(() => ({}));
+          if (err.error) showToast(err.error);
+          await refreshVault(false, true, true);
+        }
       });
-      if (res.ok) {
-        const data = await res.json();
-        if (previewFile?.id === fileId) setPreviewFile(data.file);
-        await refreshVault();
-      } else {
-        const err = await res.json().catch(() => ({}));
-        if (err.error) showToast(err.error);
-      }
     } catch {
       await patchFileOffline();
     }
   };
 
   const handleTrashOrDeleteFile = async (file: FileItem, permanent = false) => {
-    if (isOffline) {
-      if (permanent) {
-        await deleteStoreItem('files', file.id);
-        await deleteStoreItem('blobs', file.id);
-        await enqueueOfflineAction({
-          id: `q_${Date.now()}_${file.id}`,
-          type: 'delete_file',
-          payload: { fileId: file.id },
-          createdAt: new Date().toISOString(),
-        });
-        await refreshVault(true);
-        return;
-      }
+    if (!permanent) {
       await handlePatchFile(file.id, { trashed: true });
       return;
     }
-    if (permanent) {
-      await apiFetch(`/api/files/${file.id}`, { method: 'DELETE' });
-    } else {
-      await handlePatchFile(file.id, { trashed: true });
+
+    // 0ms Optimistic permanent delete
+    setVault((prev) =>
+      prev ? { ...prev, files: prev.files.filter((f) => f.id !== file.id) } : prev
+    );
+    if (previewFile?.id === file.id) setPreviewFile(null);
+
+    if (isOffline) {
+      await deleteStoreItem('files', file.id);
+      await deleteStoreItem('blobs', file.id);
+      await enqueueOfflineAction({
+        id: `q_${Date.now()}_${file.id}`,
+        type: 'delete_file',
+        payload: { fileId: file.id },
+        createdAt: new Date().toISOString(),
+      });
+      await refreshVault(true, true);
+      return;
     }
-    await refreshVault();
+
+    await enqueueServerMutation(async () => {
+      await apiFetch(`/api/files/${file.id}`, { method: 'DELETE' });
+      await deleteStoreItem('files', file.id).catch(() => {});
+      await deleteStoreItem('blobs', file.id).catch(() => {});
+    });
   };
 
   const handleTrashOrDeleteFolder = async (
     folder: FolderItem,
     permanent = false
   ) => {
-    if (isOffline && vault) {
-      const now = new Date().toISOString();
-      const affectedIds = new Set<string>([folder.id]);
+    const now = new Date().toISOString();
+    const affectedIds = new Set<string>([folder.id]);
+    if (vault) {
       let expanded = true;
       while (expanded) {
         expanded = false;
         for (const sub of vault.folders) {
-          if (sub.parentId && affectedIds.has(sub.parentId) && !affectedIds.has(sub.id)) {
+          if (
+            sub.parentId &&
+            affectedIds.has(sub.parentId) &&
+            !affectedIds.has(sub.id)
+          ) {
             affectedIds.add(sub.id);
             expanded = true;
           }
         }
       }
+    }
 
+    // 0ms Optimistic UI update
+    if (currentFolderId && affectedIds.has(currentFolderId)) {
+      setCurrentFolderId(null);
+    }
+    setVault((prev) => {
+      if (!prev) return prev;
+      if (permanent) {
+        return {
+          ...prev,
+          folders: prev.folders.filter((f) => !affectedIds.has(f.id)),
+          files: prev.files.filter(
+            (fl) => !(fl.folderId && affectedIds.has(fl.folderId))
+          ),
+        };
+      }
+      return {
+        ...prev,
+        folders: prev.folders.map((f) =>
+          affectedIds.has(f.id) ? { ...f, trashed: true, updatedAt: now } : f
+        ),
+        files: prev.files.map((fl) =>
+          fl.folderId && affectedIds.has(fl.folderId)
+            ? { ...fl, trashed: true, updatedAt: now }
+            : fl
+        ),
+      };
+    });
+
+    if (isOffline && vault) {
       if (permanent) {
         for (const fid of affectedIds) {
           await deleteStoreItem('folders', fid);
@@ -767,37 +1022,64 @@ export function App() {
           createdAt: now,
         });
       }
-      if (currentFolderId && affectedIds.has(currentFolderId)) setCurrentFolderId(null);
-      await refreshVault(true);
+      await refreshVault(true, true);
       return;
     }
-    if (permanent) {
-      await apiFetch(`/api/folders/${folder.id}`, { method: 'DELETE' });
-    } else {
-      await apiFetch(`/api/folders/${folder.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ trashed: true }),
-      });
-    }
-    if (currentFolderId === folder.id) setCurrentFolderId(null);
-    await refreshVault();
+
+    await enqueueServerMutation(async () => {
+      if (permanent) {
+        await apiFetch(`/api/folders/${folder.id}`, { method: 'DELETE' });
+        for (const fid of affectedIds) {
+          await deleteStoreItem('folders', fid).catch(() => {});
+        }
+      } else {
+        await apiFetch(`/api/folders/${folder.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ trashed: true }),
+        });
+      }
+    });
   };
 
   const handleRestoreFolder = async (folder: FolderItem) => {
-    if (isOffline && vault) {
-      const now = new Date().toISOString();
-      const affectedIds = new Set<string>([folder.id]);
+    const now = new Date().toISOString();
+    const affectedIds = new Set<string>([folder.id]);
+    if (vault) {
       let expanded = true;
       while (expanded) {
         expanded = false;
         for (const sub of vault.folders) {
-          if (sub.parentId && affectedIds.has(sub.parentId) && !affectedIds.has(sub.id)) {
+          if (
+            sub.parentId &&
+            affectedIds.has(sub.parentId) &&
+            !affectedIds.has(sub.id)
+          ) {
             affectedIds.add(sub.id);
             expanded = true;
           }
         }
       }
+    }
+
+    // 0ms Optimistic UI restore
+    setVault((prev) =>
+      prev
+        ? {
+            ...prev,
+            folders: prev.folders.map((f) =>
+              affectedIds.has(f.id) ? { ...f, trashed: false, updatedAt: now } : f
+            ),
+            files: prev.files.map((fl) =>
+              fl.folderId && affectedIds.has(fl.folderId)
+                ? { ...fl, trashed: false, updatedAt: now }
+                : fl
+            ),
+          }
+        : prev
+    );
+
+    if (isOffline && vault) {
       for (const sub of vault.folders) {
         if (affectedIds.has(sub.id)) {
           await putStoreItem('folders', {
@@ -824,15 +1106,17 @@ export function App() {
         payload: { folderId: folder.id, trashed: false },
         createdAt: now,
       });
-      await refreshVault(true);
+      await refreshVault(true, true);
       return;
     }
-    await apiFetch(`/api/folders/${folder.id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ trashed: false }),
+
+    await enqueueServerMutation(async () => {
+      await apiFetch(`/api/folders/${folder.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trashed: false }),
+      });
     });
-    await refreshVault();
   };
 
   const handleConnectCredentials = async (
@@ -848,34 +1132,56 @@ export function App() {
     if (!res.ok) {
       throw new Error(data.error || 'Failed to verify storage credentials');
     }
-    await refreshVault();
+    await refreshVault(false, false, true);
     showToast(`Connected ${data.account.accountLabel}`);
   };
 
   const handleSyncAccount = async (accountId: string) => {
-    const res = await apiFetch(`/api/accounts/${accountId}/sync`, {
-      method: 'POST',
-    });
-    const data = await res.json();
-    if (res.ok) {
-      await refreshVault();
-      showToast(`Synced ${data.importedCount || 0} remote file(s)`);
+    try {
+      const res = await apiFetch(`/api/accounts/${accountId}/sync`, {
+        method: 'POST',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        await refreshVault(false, true, true);
+        showToast(`Synced ${data.importedCount || 0} remote file(s)`);
+      } else {
+        showToast(data.error || 'Cloud sync failed — reconnect account');
+      }
+    } catch {
+      showToast('Network error while syncing cloud account');
     }
   };
 
   const handleDisconnectAccount = async (accountId: string) => {
-    await apiFetch(`/api/accounts/${accountId}`, { method: 'DELETE' });
-    await refreshVault();
+    setVault((prev) =>
+      prev
+        ? {
+            ...prev,
+            accounts: prev.accounts.filter((a) => a.id !== accountId),
+          }
+        : prev
+    );
+    await enqueueServerMutation(async () => {
+      await apiFetch(`/api/accounts/${accountId}`, { method: 'DELETE' });
+      await refreshVault(false, true, true);
+    });
     showToast('Disconnected account');
   };
 
   const handleUpdateRule = async (allocationRule: AllocationRule) => {
-    await apiFetch('/api/vault/settings', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ allocationRule }),
+    setVault((prev) =>
+      prev
+        ? { ...prev, settings: { ...prev.settings, allocationRule } }
+        : prev
+    );
+    await enqueueServerMutation(async () => {
+      await apiFetch('/api/vault/settings', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ allocationRule }),
+      });
     });
-    await refreshVault();
   };
 
   const handleCreateAiKey = async (
@@ -883,27 +1189,46 @@ export function App() {
     scope: 'read' | 'read_write',
     allowedFolderIds: string[]
   ) => {
-    await apiFetch('/api/ai-keys', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, scope, allowedFolderIds }),
+    await enqueueServerMutation(async () => {
+      await apiFetch('/api/ai-keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, scope, allowedFolderIds }),
+      });
+      await refreshVault(false, true, true);
     });
-    await refreshVault();
     showToast(`Created key "${name}"`);
   };
 
   const handleToggleKeyActive = async (key: AiApiKey) => {
-    await apiFetch(`/api/ai-keys/${key.id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ active: !key.active }),
+    setVault((prev) =>
+      prev
+        ? {
+            ...prev,
+            apiKeys: prev.apiKeys.map((k) =>
+              k.id === key.id ? { ...k, active: !key.active } : k
+            ),
+          }
+        : prev
+    );
+    await enqueueServerMutation(async () => {
+      await apiFetch(`/api/ai-keys/${key.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ active: !key.active }),
+      });
     });
-    await refreshVault();
   };
 
   const handleDeleteKey = async (keyId: string) => {
-    await apiFetch(`/api/ai-keys/${keyId}`, { method: 'DELETE' });
-    await refreshVault();
+    setVault((prev) =>
+      prev
+        ? { ...prev, apiKeys: prev.apiKeys.filter((k) => k.id !== keyId) }
+        : prev
+    );
+    await enqueueServerMutation(async () => {
+      await apiFetch(`/api/ai-keys/${keyId}`, { method: 'DELETE' });
+    });
   };
 
   const handleTriggerPwaInstall = async () => {
@@ -939,7 +1264,7 @@ export function App() {
         setCurrentFolderId(null);
       }
       setActiveTab(nextTab);
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      window.scrollTo(0, 0);
     },
     [activeTab]
   );
@@ -947,17 +1272,13 @@ export function App() {
   if (!authReady) {
     return (
       <div className="min-h-[100dvh] bg-canvas flex flex-col items-center justify-center gap-3.5">
-        <motion.div
-          animate={{ scale: [0.96, 1.04, 0.96] }}
-          transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut' }}
-          className="w-12 h-12 rounded-2xl bg-surface border border-line-strong flex items-center justify-center shadow-card"
-        >
+        <div className="w-12 h-12 rounded-2xl bg-surface border border-line-strong flex items-center justify-center shadow-card">
           <img
             src="/cloudy-logo.png"
             alt="Cloudy"
             className="w-7 h-7 object-contain"
           />
-        </motion.div>
+        </div>
         <div className="text-xs font-medium text-ink-muted tracking-wide">
           Cloudy · X-Kilo
         </div>
@@ -999,17 +1320,13 @@ export function App() {
   if (!vault) {
     return (
       <div className="min-h-[100dvh] bg-canvas flex flex-col items-center justify-center gap-3.5">
-        <motion.div
-          animate={{ scale: [0.96, 1.04, 0.96] }}
-          transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut' }}
-          className="w-12 h-12 rounded-2xl bg-surface border border-line-strong flex items-center justify-center shadow-card"
-        >
+        <div className="w-12 h-12 rounded-2xl bg-surface border border-line-strong flex items-center justify-center shadow-card">
           <img
             src="/cloudy-logo.png"
             alt="Cloudy"
             className="w-7 h-7 object-contain"
           />
-        </motion.div>
+        </div>
         <div className="text-xs font-medium text-ink-muted tracking-wide">
           Cloudy · X-Kilo
         </div>
@@ -1057,85 +1374,82 @@ export function App() {
           onLogout={handleLogout}
         />
 
-        {/* Smooth Page Transitions */}
-        <AnimatePresence mode="wait">
-          <motion.main
-            key={activeTab}
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -6 }}
-            transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
-            className="flex-1 flex flex-col min-w-0"
-          >
-            {activeTab === 'providers' ? (
-              <ProvidersHub
-                vault={vault}
-                isOffline={isOffline}
-                onConnectCredentials={handleConnectCredentials}
-                onSyncAccount={handleSyncAccount}
-                onDisconnectAccount={handleDisconnectAccount}
-                onUpdateAllocationRule={handleUpdateRule}
-                onConnectedRefresh={async (label) => {
-                  await refreshVault(false, false, true);
-                  showToast(`Connected ${label || 'Cloud Storage'}`);
-                }}
-              />
-            ) : activeTab === 'ai-keys' ? (
-              <AiApiKeysView
-                vault={vault}
-                isOffline={isOffline}
-                onCreateKey={handleCreateAiKey}
-                onToggleKeyActive={handleToggleKeyActive}
-                onDeleteKey={handleDeleteKey}
-                onRefreshState={() => refreshVault()}
-                onSaveGeneratedNote={(name, content, folderId) =>
-                  handleCreateNote(name, content, 'text/markdown', 'note', folderId)
-                }
-              />
-            ) : activeTab === 'database' ? (
-              <DatabaseView
-                vault={vault}
-                authUser={authUser}
-                isOffline={isOffline}
-                onUserUpdated={(u) => setAuthUser(u)}
-                onLogout={handleLogout}
-                onOpenAuthScreen={handleOpenAuthScreen}
-                onShowToast={showToast}
-              />
-            ) : activeTab === 'android' ? (
-              <AndroidView
-                deferredPrompt={deferredPrompt}
-                onTriggerPwaInstall={handleTriggerPwaInstall}
-                swReady={swReady}
-              />
-            ) : (
-              <DriveExplorer
-                vault={vault}
-                currentFolderId={currentFolderId}
-                onSelectFolder={setCurrentFolderId}
-                onNavigateToProviders={() => handleSelectNavTab('providers')}
-                searchQuery={searchQuery}
-                onClearSearch={() => setSearchQuery('')}
-                isOffline={isOffline}
-                onUploadFiles={handleUploadFiles}
-                onCreateFolder={handleCreateFolder}
-                onCreateNote={handleCreateNote}
-                onOpenFile={setPreviewFile}
-                onDownloadFile={handleDownloadFile}
-                onTrashOrDeleteFile={handleTrashOrDeleteFile}
-                onRestoreFile={(f) => handlePatchFile(f.id, { trashed: false })}
-                onTrashOrDeleteFolder={handleTrashOrDeleteFolder}
-                onRestoreFolder={handleRestoreFolder}
-              />
-            )}
-          </motion.main>
-        </AnimatePresence>
+        {/* Instant Zero-Wait Tab Views */}
+        <motion.main
+          key={activeTab}
+          initial={{ opacity: 0.92 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 0.12, ease: 'easeOut' }}
+          className="flex-1 flex flex-col min-w-0"
+        >
+          {activeTab === 'providers' ? (
+            <ProvidersHub
+              vault={vault}
+              isOffline={isOffline}
+              onConnectCredentials={handleConnectCredentials}
+              onSyncAccount={handleSyncAccount}
+              onDisconnectAccount={handleDisconnectAccount}
+              onUpdateAllocationRule={handleUpdateRule}
+              onConnectedRefresh={async (label) => {
+                await refreshVault(false, false, true);
+                showToast(`Connected ${label || 'Cloud Storage'}`);
+              }}
+            />
+          ) : activeTab === 'ai-keys' ? (
+            <AiApiKeysView
+              vault={vault}
+              isOffline={isOffline}
+              onCreateKey={handleCreateAiKey}
+              onToggleKeyActive={handleToggleKeyActive}
+              onDeleteKey={handleDeleteKey}
+              onRefreshState={() => refreshVault(false, true, true)}
+              onSaveGeneratedNote={(name, content, folderId) =>
+                handleCreateNote(name, content, 'text/markdown', 'note', folderId)
+              }
+            />
+          ) : activeTab === 'database' ? (
+            <DatabaseView
+              vault={vault}
+              authUser={authUser}
+              isOffline={isOffline}
+              onUserUpdated={(u) => setAuthUser(u)}
+              onLogout={handleLogout}
+              onOpenAuthScreen={handleOpenAuthScreen}
+              onShowToast={showToast}
+            />
+          ) : activeTab === 'android' ? (
+            <AndroidView
+              deferredPrompt={deferredPrompt}
+              onTriggerPwaInstall={handleTriggerPwaInstall}
+              swReady={swReady}
+            />
+          ) : (
+            <DriveExplorer
+              vault={vault}
+              currentFolderId={currentFolderId}
+              onSelectFolder={setCurrentFolderId}
+              onNavigateToProviders={() => handleSelectNavTab('providers')}
+              searchQuery={searchQuery}
+              onClearSearch={() => setSearchQuery('')}
+              isOffline={isOffline}
+              onUploadFiles={handleUploadFiles}
+              onCreateFolder={handleCreateFolder}
+              onCreateNote={handleCreateNote}
+              onOpenFile={setPreviewFile}
+              onDownloadFile={handleDownloadFile}
+              onTrashOrDeleteFile={handleTrashOrDeleteFile}
+              onRestoreFile={(f) => handlePatchFile(f.id, { trashed: false })}
+              onTrashOrDeleteFolder={handleTrashOrDeleteFolder}
+              onRestoreFolder={handleRestoreFolder}
+            />
+          )}
+        </motion.main>
       </div>
 
-      {/* Native-Style Glass Mobile Navigation Bar with Safe-Area Support */}
+      {/* High-FPS Mobile Navigation Bar with Safe-Area Support */}
       <nav
         aria-label="Primary Mobile Navigation"
-        className="fixed bottom-0 inset-x-0 z-30 lg:hidden bg-sidebar/94 backdrop-blur-2xl border-t border-line px-2 pt-1.5 pb-[max(0.45rem,env(safe-area-inset-bottom,0px))]"
+        className="fixed bottom-0 inset-x-0 z-30 lg:hidden bg-sidebar/98 sm:bg-sidebar/92 sm:backdrop-blur-xl border-t border-line px-2 pt-1.5 pb-[max(0.45rem,env(safe-area-inset-bottom,0px))]"
       >
         <div className="max-w-md mx-auto grid grid-cols-5 gap-1">
           {[
@@ -1158,16 +1472,9 @@ export function App() {
                 type="button"
                 onClick={() => handleSelectNavTab(item.id)}
                 className={`relative flex flex-col items-center justify-center gap-0.5 py-1.5 rounded-2xl transition-colors ${
-                  active ? 'text-ink' : 'text-ink-muted active:text-ink'
+                  active ? 'text-ink bg-surface border border-line-strong shadow-card' : 'text-ink-muted active:text-ink border border-transparent'
                 }`}
               >
-                {active && (
-                  <motion.span
-                    layoutId="mobileDockPill"
-                    transition={{ type: 'spring', stiffness: 450, damping: 34 }}
-                    className="absolute inset-x-1 inset-y-0.5 rounded-2xl bg-surface border border-line-strong shadow-card"
-                  />
-                )}
                 <span className="relative z-10 flex items-center justify-center">
                   <Icon
                     className={`w-[18px] h-[18px] transition-colors ${
@@ -1210,15 +1517,15 @@ export function App() {
         onDownload={handleDownloadFile}
       />
 
-      {/* Spring Toast Notification (Safe on Narrow Mobile Screens) */}
+      {/* Crisp Toast Notification (Safe on Narrow Mobile Screens) */}
       <AnimatePresence>
         {toast && (
           <motion.div
-            initial={{ opacity: 0, y: 16, scale: 0.95 }}
+            initial={{ opacity: 0, y: 12, scale: 0.96 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 10, scale: 0.95 }}
-            transition={{ type: 'spring', stiffness: 450, damping: 30 }}
-            className="fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom,0px))] lg:bottom-6 inset-x-4 sm:inset-x-auto sm:right-6 z-50 mx-auto sm:mx-0 w-fit max-w-[calc(100vw-2rem)] px-4 py-2.5 rounded-full bg-surface/95 backdrop-blur-xl border border-line-strong text-xs font-medium text-ink shadow-float flex items-center gap-2"
+            exit={{ opacity: 0, y: 8, scale: 0.96 }}
+            transition={{ duration: 0.16, ease: 'easeOut' }}
+            className="fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom,0px))] lg:bottom-6 inset-x-4 sm:inset-x-auto sm:right-6 z-50 mx-auto sm:mx-0 w-fit max-w-[calc(100vw-2rem)] px-4 py-2.5 rounded-full bg-surface border border-line-strong text-xs font-medium text-ink shadow-float flex items-center gap-2"
           >
             <CheckCircle2 className="w-4 h-4 text-[#10A37F] shrink-0" />
             <span className="truncate">{toast}</span>

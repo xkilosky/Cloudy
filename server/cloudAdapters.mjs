@@ -1056,6 +1056,38 @@ export async function downloadFileFromRemoteProvider(
 
   if (providerId === 'google_drive') {
     const token = await getValidOAuthToken(account, getOAuthConfig, onTokensUpdated);
+    const mime = String(fileRecord.mimeType || '');
+
+    // Google Workspace Docs/Sheets/Slides require /export rather than ?alt=media
+    if (mime.startsWith('application/vnd.google-apps.')) {
+      let exportMime = 'application/pdf';
+      if (mime.includes('spreadsheet')) exportMime = 'text/csv';
+      else if (mime.includes('script')) exportMime = 'application/vnd.google-apps.script+json';
+
+      const expRes = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(remoteId)}/export?mimeType=${encodeURIComponent(exportMime)}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (expRes.ok) {
+        const out = Buffer.from(await expRes.arrayBuffer());
+        out._exportedMimeType = exportMime;
+        return out;
+      }
+      // Fallback to plain text export for Google Docs if PDF export is restricted
+      if (mime.includes('document')) {
+        const txtRes = await fetch(
+          `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(remoteId)}/export?mimeType=text/plain`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        if (txtRes.ok) {
+          const out = Buffer.from(await txtRes.arrayBuffer());
+          out._exportedMimeType = 'text/plain; charset=utf-8';
+          return out;
+        }
+      }
+      return null;
+    }
+
     const res = await fetch(
       `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(remoteId)}?alt=media`,
       { headers: { Authorization: `Bearer ${token}` } }
@@ -1199,6 +1231,7 @@ export async function listRemoteProviderFiles(account, getOAuthConfig, onTokensU
       name: f.name,
       mimeType: f.mimeType || 'application/octet-stream',
       size: Number(f.size || 0),
+      webUrl: f.webViewLink || null,
       updatedAt: f.modifiedTime || new Date().toISOString(),
     }));
   }
@@ -1239,6 +1272,7 @@ export async function listRemoteProviderFiles(account, getOAuthConfig, onTokensU
         name: item.name,
         mimeType: item.file?.mimeType || 'application/octet-stream',
         size: Number(item.size || 0),
+        webUrl: item.webUrl || null,
         updatedAt: item.lastModifiedDateTime || new Date().toISOString(),
       }));
   }

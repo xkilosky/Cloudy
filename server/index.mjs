@@ -53,6 +53,7 @@ import {
   uploadFileToRemoteProvider,
   downloadFileFromRemoteProvider,
   listRemoteProviderFiles,
+  getValidOAuthToken,
   sealCredentials,
   initNextcloudLoginFlow,
   pollNextcloudLoginFlow,
@@ -121,7 +122,10 @@ app.use('/api', async (req, res, next) => {
   }
 
   const targetVaultId = reqVaultId(req);
+  const isServerlessMutation =
+    Boolean(process.env.VERCEL) && req.method !== 'GET' && req.method !== 'HEAD';
   const forceFreshVault =
+    isServerlessMutation ||
     req.query.fresh === '1' ||
     req.headers['x-cloudy-force-fresh'] === '1' ||
     req.path.startsWith('/device-auth/') ||
@@ -423,7 +427,7 @@ app.post('/api/database/sync', async (req, res) => {
     const vaultId = reqVaultId(req);
     const db = loadDb(vaultId);
     await saveDb(vaultId);
-    await syncVaultRelationalTables(vaultId, db);
+    await syncVaultRelationalTables(vaultId, db, true);
     await flushPendingSaves();
     const overview = await buildDatabaseOverview({
       userRow: req.authUser || null,
@@ -452,7 +456,7 @@ function makeTokenUpdateHandler(db, account) {
   };
 }
 
-async function importRemoteFilesIntoVault(db, account) {
+async function importRemoteFilesIntoVault(db, account, { propagateAuthError = false } = {}) {
   try {
     const unsealed = getUnsealedAccount(account);
     const remoteItems = await listRemoteProviderFiles(
@@ -460,16 +464,21 @@ async function importRemoteFilesIntoVault(db, account) {
       (pid) => getOAuthConfigForProvider(db, pid),
       makeTokenUpdateHandler(db, account)
     );
-    const existingRemoteIds = new Set(
+    const existingByRemoteId = new Map(
       db.files
         .filter((f) => f.accountId === account.id && f.remoteId)
-        .map((f) => f.remoteId)
+        .map((f) => [f.remoteId, f])
     );
 
     let importedCount = 0;
     const now = new Date().toISOString();
     for (const r of remoteItems) {
-      if (!r.remoteId || existingRemoteIds.has(r.remoteId)) continue;
+      if (!r.remoteId) continue;
+      const prev = existingByRemoteId.get(r.remoteId);
+      if (prev) {
+        if (r.webUrl && !prev.webUrl) prev.webUrl = r.webUrl;
+        continue;
+      }
       db.files.push({
         id: makeId('fil'),
         name: r.name,
@@ -482,9 +491,10 @@ async function importRemoteFilesIntoVault(db, account) {
         providerName: account.providerName,
         remoteId: r.remoteId,
         remotePath: r.remotePath,
+        webUrl: r.webUrl || null,
         importedRemote: true,
         mirrorAccountId: null,
-        offlinePinned: r.size <= 5 * 1024 * 1024,
+        offlinePinned: false,
         starred: false,
         trashed: false,
         tags: ['cloud-synced'],
@@ -492,13 +502,16 @@ async function importRemoteFilesIntoVault(db, account) {
         createdAt: r.updatedAt || now,
         updatedAt: r.updatedAt || now,
       });
-      existingRemoteIds.add(r.remoteId);
+      existingByRemoteId.set(r.remoteId, db.files[db.files.length - 1]);
       importedCount++;
     }
     account.lastSyncedAt = now;
     saveDb(db.vaultId);
     return importedCount;
-  } catch {
+  } catch (err) {
+    if (propagateAuthError && /expired|401|unauth|invalid_grant/i.test(String(err?.message || err))) {
+      throw err;
+    }
     return 0;
   }
 }
@@ -1145,19 +1158,47 @@ app.post('/api/accounts/:id/sync', async (req, res) => {
     if (!acc) return res.status(404).json({ ok: false, error: 'Account not found' });
 
     const unsealed = getUnsealedAccount(acc);
+    if (
+      unsealed.credentials &&
+      ['google_drive', 'onedrive', 'dropbox', 'box'].includes(acc.providerId)
+    ) {
+      const freshToken = await getValidOAuthToken(
+        unsealed,
+        (pid) => getOAuthConfigForProvider(db, pid),
+        makeTokenUpdateHandler(db, acc)
+      );
+      unsealed.credentials.accessToken = freshToken;
+    }
+
     if (unsealed.credentials) {
       try {
         const verified = await verifyAndInspectProvider(acc.providerId, unsealed.credentials);
         acc.quotaBytes = verified.quotaBytes;
         acc.baseExternalUsedBytes = verified.usedBytes;
-      } catch {
-        // Keep cached quota if refresh endpoint unavailable
+      } catch (verifyErr) {
+        if (/expired|401|unauth|invalid_grant/i.test(String(verifyErr?.message || verifyErr))) {
+          return res.status(401).json({
+            ok: false,
+            code: 'CLOUD_REAUTH_NEEDED',
+            error: `${acc.providerName} token expired — tap + Add on ${acc.providerName} to refresh sign-in.`,
+          });
+        }
       }
     }
-    const importedCount = await importRemoteFilesIntoVault(db, acc);
+    const importedCount = await importRemoteFilesIntoVault(db, acc, {
+      propagateAuthError: true,
+    });
     res.json({ ok: true, importedCount, account: sanitizeAccount(acc) });
   } catch (err) {
-    res.status(400).json({ ok: false, error: String(err.message || err) });
+    const msg = String(err?.message || err);
+    if (/expired|401|unauth|invalid_grant/i.test(msg)) {
+      return res.status(401).json({
+        ok: false,
+        code: 'CLOUD_REAUTH_NEEDED',
+        error: 'Cloud provider session expired — reconnect this provider in Cloud Pool.',
+      });
+    }
+    res.status(400).json({ ok: false, error: msg });
   }
 });
 
@@ -1191,14 +1232,30 @@ app.delete('/api/accounts/:id', (req, res) => {
 app.post('/api/folders', (req, res) => {
   const db = loadDb(reqVaultId(req));
   const { id, name, parentId = null, offlinePinned = true } = req.body || {};
-  if (!name || !String(name).trim()) {
+  const trimmedName = String(name || '').trim();
+  if (!trimmedName) {
     return res.status(400).json({ ok: false, error: 'Folder name is required' });
   }
-  const now = new Date().toISOString();
+  const normalizedParent = parentId || null;
+  const nowMs = Date.now();
+  const now = new Date(nowMs).toISOString();
+
+  // Prevent rapid duplicate carpeta creation on double-tap / slow cellular retries
+  const recentDuplicate = db.folders.find(
+    (f) =>
+      !f.trashed &&
+      (f.parentId || null) === normalizedParent &&
+      f.name.trim().toLowerCase() === trimmedName.toLowerCase() &&
+      nowMs - new Date(f.createdAt || 0).getTime() < 8000
+  );
+  if (recentDuplicate && (!id || recentDuplicate.id !== id)) {
+    return res.status(200).json({ ok: true, folder: recentDuplicate, deduplicated: true });
+  }
+
   const folder = {
     id: id && String(id).startsWith('fld_') ? String(id) : makeId('fld'),
-    name: String(name).trim(),
-    parentId: parentId || null,
+    name: trimmedName,
+    parentId: normalizedParent,
     offlinePinned: offlinePinned !== false,
     starred: false,
     trashed: false,
@@ -1551,9 +1608,17 @@ app.get('/api/files/:id/blob', async (req, res) => {
     if (!file) return res.status(404).json({ ok: false, error: 'File not found' });
 
     let buf = readAccountBinary(file.accountId, file.id, file.mirrorAccountId);
+    let contentType = file.mimeType || 'application/octet-stream';
+
+    // Fast path for inline text notes/datasets before remote storage round-trips
+    if (!buf && typeof file.textContent === 'string' && (!file.remoteId && !file.remotePath)) {
+      buf = Buffer.from(file.textContent, 'utf8');
+    }
+
     if (!buf && (!file.accountId || file.accountId === 'offline_vault')) {
       buf = await readOfflineVaultBinaryAsync(db.vaultId, file.id);
     }
+
     if (!buf && (file.remoteId || file.remotePath)) {
       const acc = db.accounts.find((a) => a.id === file.accountId);
       if (acc) {
@@ -1564,29 +1629,59 @@ app.get('/api/files/:id/blob', async (req, res) => {
           makeTokenUpdateHandler(db, acc)
         );
         if (buf) {
-          writeAccountBinary(file.accountId, file.id, buf, db.vaultId, file.mimeType);
-          if (!file.textContent && isLikelyTextMime(file.mimeType, file.name) && buf.byteLength <= 2 * 1024 * 1024) {
+          if (buf._exportedMimeType) {
+            contentType = buf._exportedMimeType;
+          }
+          writeAccountBinary(file.accountId, file.id, buf, db.vaultId, contentType);
+          if (
+            !file.textContent &&
+            isLikelyTextMime(contentType, file.name) &&
+            buf.byteLength <= 2 * 1024 * 1024
+          ) {
             file.textContent = buf.toString('utf8');
             saveDb(db.vaultId);
           }
         }
       }
     }
+
     if (!buf && typeof file.textContent === 'string') {
       buf = Buffer.from(file.textContent, 'utf8');
     }
 
-    if (!buf) return res.status(404).json({ ok: false, error: 'Binary missing from cloud storage' });
+    if (!buf) {
+      return res.status(404).json({
+        ok: false,
+        code: 'BLOB_UNAVAILABLE',
+        error: 'File content could not be retrieved from cloud storage.',
+      });
+    }
 
     const disposition = req.query.download === '1' ? 'attachment' : 'inline';
-    res.setHeader('Content-Type', file.mimeType || 'application/octet-stream');
+    let downloadName = file.name;
+    if (
+      String(file.mimeType || '').startsWith('application/vnd.google-apps.') &&
+      contentType === 'application/pdf' &&
+      !downloadName.toLowerCase().endsWith('.pdf')
+    ) {
+      downloadName = `${downloadName}.pdf`;
+    }
+    res.setHeader('Content-Type', contentType);
     res.setHeader(
       'Content-Disposition',
-      `${disposition}; filename="${encodeURIComponent(file.name)}"`
+      `${disposition}; filename="${encodeURIComponent(downloadName)}"`
     );
     res.send(buf);
   } catch (err) {
-    res.status(500).json({ ok: false, error: String(err.message || err) });
+    const msg = String(err?.message || err);
+    if (/expired|401|unauth|invalid_grant/i.test(msg)) {
+      return res.status(422).json({
+        ok: false,
+        code: 'CLOUD_REAUTH_NEEDED',
+        error: 'Cloud provider token expired — reconnect this cloud account in Clouds.',
+      });
+    }
+    res.status(500).json({ ok: false, error: msg });
   }
 });
 

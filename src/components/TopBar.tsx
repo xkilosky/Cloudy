@@ -122,7 +122,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   };
 
   return (
-    <header className="sticky top-0 z-30 pt-safe bg-canvas/85 backdrop-blur-2xl border-b border-line">
+    <header className="sticky top-0 z-30 pt-safe bg-canvas/96 sm:bg-canvas/85 sm:backdrop-blur-xl border-b border-line">
       <div className="relative h-14 sm:h-16 px-3.5 sm:px-8 flex items-center justify-between gap-2.5 sm:gap-4">
         {/* Mobile Brand + Active View Label */}
         <button

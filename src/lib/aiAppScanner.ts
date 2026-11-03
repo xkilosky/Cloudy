@@ -451,6 +451,7 @@ export async function scanForAiApps(params: {
   customAppName?: string;
   customAppUrl?: string;
   capabilityHint?: CustomAppCapabilityHint;
+  passiveMount?: boolean;
 }): Promise<AppScanResult> {
   const {
     apiKey,
@@ -458,6 +459,7 @@ export async function scanForAiApps(params: {
     customAppName = '',
     customAppUrl = '',
     capabilityHint = 'auto',
+    passiveMount = false,
   } = params;
 
   const normalizedCustomUrl = normalizePortOrUrl(customAppUrl);
@@ -465,49 +467,63 @@ export async function scanForAiApps(params: {
   let bridgeRunning = false;
   let mcpScriptPath = '/path/to/Cloudy-PlugAndPlay-AI/cloudy_mcp_server.py';
 
+  const isMobile =
+    typeof navigator !== 'undefined' &&
+    /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
+  const isRemoteHttps =
+    typeof window !== 'undefined' &&
+    window.location.protocol === 'https:' &&
+    window.location.hostname !== 'localhost' &&
+    window.location.hostname !== '127.0.0.1';
+
+  const shouldSkipLocalhostSweep =
+    isMobile || (passiveMount && isRemoteHttps && !normalizedCustomUrl);
+
   // 1. Query Local Cloudy Bridge (/api/v1/ai/scan-apps) for full OS + port discovery
-  try {
-    const qs = new URLSearchParams();
-    if (customAppName.trim()) qs.set('customName', customAppName.trim());
-    if (normalizedCustomUrl) qs.set('customUrl', normalizedCustomUrl);
+  if (!shouldSkipLocalhostSweep) {
+    try {
+      const qs = new URLSearchParams();
+      if (customAppName.trim()) qs.set('customName', customAppName.trim());
+      if (normalizedCustomUrl) qs.set('customUrl', normalizedCustomUrl);
 
-    const headers: Record<string, string> = {};
-    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+      const headers: Record<string, string> = {};
+      if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
 
-    const ctrl = new AbortController();
-    const timer = window.setTimeout(() => ctrl.abort(), 2200);
-    const res = await fetch(
-      `http://127.0.0.1:8765/api/v1/ai/scan-apps?${qs.toString()}`,
-      { headers, signal: ctrl.signal }
-    );
-    window.clearTimeout(timer);
+      const ctrl = new AbortController();
+      const timer = window.setTimeout(() => ctrl.abort(), 1200);
+      const res = await fetch(
+        `http://127.0.0.1:8765/api/v1/ai/scan-apps?${qs.toString()}`,
+        { headers, signal: ctrl.signal }
+      );
+      window.clearTimeout(timer);
 
-    if (res.ok) {
-      const data = await res.json();
-      if (data?.ok) {
-        bridgeRunning = true;
-        if (data.mcpScriptPath) mcpScriptPath = String(data.mcpScriptPath);
-        for (const raw of data.apps || []) {
-          const built = buildInstructionsForApp({
-            id: raw.id,
-            name: raw.name,
-            status: raw.status === 'running' ? 'running' : 'installed',
-            endpoint: raw.endpoint,
-            modelsCount: raw.modelsCount || 0,
-            bestMethod: raw.bestMethod as BestConnectionMethod,
-            canAutoConfigure: Boolean(raw.canAutoConfigure),
-            configPath: raw.configPath,
-            bridgeRunning: true,
-            mcpScriptPath,
-            apiKey,
-            origin,
-          });
-          byId.set(built.id, built);
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.ok) {
+          bridgeRunning = true;
+          if (data.mcpScriptPath) mcpScriptPath = String(data.mcpScriptPath);
+          for (const raw of data.apps || []) {
+            const built = buildInstructionsForApp({
+              id: raw.id,
+              name: raw.name,
+              status: raw.status === 'running' ? 'running' : 'installed',
+              endpoint: raw.endpoint,
+              modelsCount: raw.modelsCount || 0,
+              bestMethod: raw.bestMethod as BestConnectionMethod,
+              canAutoConfigure: Boolean(raw.canAutoConfigure),
+              configPath: raw.configPath,
+              bridgeRunning: true,
+              mcpScriptPath,
+              apiKey,
+              origin,
+            });
+            byId.set(built.id, built);
+          }
         }
       }
+    } catch {
+      // Bridge not running — run direct browser probes below
     }
-  } catch {
-    // Bridge not running — run direct browser probes below
   }
 
   // 2. Direct Browser Port Probes (works even before Bridge is started!)
@@ -712,7 +728,9 @@ export async function scanForAiApps(params: {
     },
   ];
 
-  await Promise.all(browserProbes.map((fn) => fn()));
+  if (!shouldSkipLocalhostSweep) {
+    await Promise.all(browserProbes.map((fn) => fn()));
+  }
 
   // 3. Handle Custom / User-Named App (e.g. "Local" or custom URL)
   if (customAppName.trim() || normalizedCustomUrl) {
@@ -754,6 +772,37 @@ export async function scanForAiApps(params: {
         mcpScriptPath,
         apps: [customBuilt, ...Array.from(byId.values())],
       };
+    }
+  }
+
+  // Provide instant zero-latency starter guides when passive/mobile so UI is immediately useful without failed probes
+  if (byId.size === 0 && shouldSkipLocalhostSweep) {
+    const presets: Array<{
+      id: string;
+      name: string;
+      bestMethod: BestConnectionMethod;
+    }> = [
+      { id: 'ollama', name: 'Ollama', bestMethod: 'in_app_and_bridge' },
+      { id: 'lmstudio', name: 'LM Studio', bestMethod: 'mcp' },
+      { id: 'cursor', name: 'Cursor', bestMethod: 'mcp' },
+      { id: 'openwebui', name: 'OpenWebUI', bestMethod: 'openwebui_tool' },
+    ];
+    for (const p of presets) {
+      byId.set(
+        p.id,
+        buildInstructionsForApp({
+          id: p.id,
+          name: p.name,
+          status: 'matched',
+          endpoint: null,
+          modelsCount: 0,
+          bestMethod: p.bestMethod,
+          bridgeRunning: false,
+          mcpScriptPath,
+          apiKey,
+          origin,
+        })
+      );
     }
   }
 

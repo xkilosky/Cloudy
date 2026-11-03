@@ -396,22 +396,15 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-3.5">
-              {filteredProviders.map((provider, idx) => {
+              {filteredProviders.map((provider) => {
                 const connectedForProvider = vault.accounts.filter(
                   (a) => a.providerId === provider.id
                 );
                 const count = connectedForProvider.length;
 
                 return (
-                  <motion.div
+                  <div
                     key={provider.id}
-                    initial={{ opacity: 0, y: 12 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{
-                      duration: 0.24,
-                      delay: Math.min(idx * 0.03, 0.24),
-                    }}
-                    whileHover={{ y: -2 }}
                     className={`rounded-2xl bg-surface hover:bg-elevated/60 border p-4 sm:p-5 flex flex-col justify-between gap-4 shadow-card transition-colors ${
                       count > 0
                         ? 'border-[#10A37F]/40 hover:border-[#10A37F]/65'
@@ -467,13 +460,11 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
                         </a>
                       )}
 
-                      <motion.button
+                      <button
                         type="button"
-                        whileHover={{ scale: 1.03 }}
-                        whileTap={{ scale: 0.96 }}
                         disabled={isOffline}
                         onClick={() => setSelectedProvider(provider)}
-                        className={`px-4 py-2 sm:py-1.5 rounded-full text-xs font-semibold inline-flex items-center gap-1 transition disabled:opacity-40 ${
+                        className={`px-4 py-2 sm:py-1.5 rounded-full text-xs font-semibold inline-flex items-center gap-1 active:scale-95 transition disabled:opacity-40 ${
                           count > 0
                             ? 'bg-elevated hover:bg-canvas border border-line-strong text-ink'
                             : 'bg-accent hover:bg-accent-hover text-accent-fg shadow-glow'
@@ -481,9 +472,9 @@ export const ProvidersHub: React.FC<ProvidersHubProps> = ({
                       >
                         <Plus className="w-3.5 h-3.5" />
                         <span>{count > 0 ? 'Add Another' : 'Connect'}</span>
-                      </motion.button>
+                      </button>
                     </div>
-                  </motion.div>
+                  </div>
                 );
               })}
             </div>

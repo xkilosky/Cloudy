@@ -278,37 +278,55 @@ self.addEventListener('fetch', (event) => {
       url.pathname === '/' ||
       url.pathname === '/index.html';
 
-    // Network-First for HTML navigation so new deployments load immediately, with instant Offline Cache fallback
+    // Network-First (with 3.5s slow-cellular timeout) for HTML navigation, falling back to Offline Cache
     if (isNavigation) {
       event.respondWith(
-        fetch(request)
-          .then((response) => {
+        (async () => {
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 3500);
+          try {
+            const response = await fetch(request, { signal: ctrl.signal });
+            clearTimeout(timer);
             if (response && response.status === 200 && response.type === 'basic') {
               const clone = response.clone();
               caches.open(CACHE_NAME).then((cache) => cache.put('/index.html', clone));
             }
             return response;
-          })
-          .catch(async () => {
+          } catch {
+            clearTimeout(timer);
             return (
               (await caches.match(request)) ||
               (await caches.match('/index.html')) ||
               (await caches.match('/')) ||
               new Response('Offline', { status: 503 })
             );
-          })
+          }
+        })()
       );
       return;
     }
 
-    // Cache-First with background refresh for hashed static assets & icons
+    const isImmutableHashedAsset = url.pathname.startsWith('/assets/');
+    const expectsCodeMime =
+      url.pathname.endsWith('.js') ||
+      url.pathname.endsWith('.mjs') ||
+      url.pathname.endsWith('.css');
+
     event.respondWith(
       caches.match(request).then((cached) => {
+        if (cached && isImmutableHashedAsset) {
+          return cached;
+        }
+
         const networkFetch = fetch(request)
           .then((response) => {
             if (response && response.status === 200 && response.type === 'basic') {
-              const clone = response.clone();
-              caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
+              const ct = (response.headers.get('content-type') || '').toLowerCase();
+              // Never poison JS/CSS cache entries with SPA HTML fallback
+              if (!(expectsCodeMime && ct.includes('text/html'))) {
+                const clone = response.clone();
+                caches.open(CACHE_NAME).then((cache) => cache.put(request, clone));
+              }
             }
             return response;
           })

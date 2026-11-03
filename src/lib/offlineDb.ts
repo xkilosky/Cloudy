@@ -11,6 +11,30 @@ const DB_NAME = 'cloudy_offline_vault';
 const DB_VERSION = 1;
 
 let dbPromise: Promise<IDBDatabase> | null = null;
+let lastPersistedFingerprint: string | null = null;
+
+export function computeVaultFingerprint(state: VaultState): string {
+  const accPart = (state.accounts || [])
+    .map((a) => `${a.id}:${a.usedBytes}:${a.quotaBytes}:${a.lastSyncedAt || ''}`)
+    .join('|');
+  const fldPart = (state.folders || [])
+    .map(
+      (f) =>
+        `${f.id}:${f.name}:${f.parentId || ''}:${f.trashed ? 1 : 0}:${f.starred ? 1 : 0}:${f.updatedAt}`
+    )
+    .join('|');
+  const filPart = (state.files || [])
+    .map(
+      (f) =>
+        `${f.id}:${f.name}:${f.folderId || ''}:${f.accountId}:${f.size}:${f.trashed ? 1 : 0}:${f.starred ? 1 : 0}:${f.pendingOfflineSync ? 1 : 0}:${f.updatedAt}`
+    )
+    .join('|');
+  const keyPart = (state.apiKeys || [])
+    .map((k) => `${k.id}:${k.active ? 1 : 0}:${k.usageCount}:${k.lastUsedAt || ''}`)
+    .join('|');
+  const logLen = state.aiAuditLog?.length || 0;
+  return `${state.vaultId || ''}#${state.settings?.allocationRule || ''}#${accPart}#${fldPart}#${filPart}#${keyPart}#${logLen}`;
+}
 
 export function openVaultDb(): Promise<IDBDatabase> {
   if (dbPromise) return dbPromise;
@@ -46,24 +70,8 @@ export function openVaultDb(): Promise<IDBDatabase> {
   return dbPromise;
 }
 
-async function replaceStoreItems<T extends { id: string }>(
-  storeName: string,
-  items: T[]
-): Promise<void> {
-  const db = await openVaultDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(storeName, 'readwrite');
-    const store = tx.objectStore(storeName);
-    store.clear();
-    for (const item of items) {
-      store.put(item);
-    }
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
 export async function putStoreItem<T>(storeName: string, item: T): Promise<void> {
+  if (storeName !== 'blobs') lastPersistedFingerprint = null;
   const db = await openVaultDb();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(storeName, 'readwrite');
@@ -74,6 +82,7 @@ export async function putStoreItem<T>(storeName: string, item: T): Promise<void>
 }
 
 export async function deleteStoreItem(storeName: string, id: string): Promise<void> {
+  if (storeName !== 'blobs') lastPersistedFingerprint = null;
   const db = await openVaultDb();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(storeName, 'readwrite');
@@ -93,23 +102,69 @@ export async function getAllStoreItems<T>(storeName: string): Promise<T[]> {
   });
 }
 
+export async function getAllStoreKeys(storeName: string): Promise<string[]> {
+  const db = await openVaultDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readonly');
+    const store = tx.objectStore(storeName);
+    if (typeof store.getAllKeys === 'function') {
+      const req = store.getAllKeys();
+      req.onsuccess = () =>
+        resolve(((req.result as IDBValidKey[]) || []).map((k) => String(k)));
+      req.onerror = () => reject(req.error);
+    } else {
+      const req = store.getAll();
+      req.onsuccess = () =>
+        resolve(
+          ((req.result as Array<{ id?: string }>) || [])
+            .map((r) => String(r?.id || ''))
+            .filter(Boolean)
+        );
+      req.onerror = () => reject(req.error);
+    }
+  });
+}
+
 export async function getStoreItem<T>(storeName: string, id: string): Promise<T | null> {
   const db = await openVaultDb();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(storeName, 'readonly');
     const req = tx.objectStore(storeName).get(id);
     req.onsuccess = () => resolve((req.result as T) || null);
-    req.onerror = () => reject(req.error);
+    req.onerror = () => reject(tx.error);
   });
 }
 
 export async function persistSnapshotToOfflineVault(state: VaultState): Promise<void> {
-  await Promise.all([
-    replaceStoreItems<FolderItem>('folders', state.folders),
-    replaceStoreItems<FileItem>('files', state.files),
-    replaceStoreItems<AiApiKey>('api_keys', state.apiKeys),
-    replaceStoreItems<StorageAccount>('accounts', state.accounts),
-    putStoreItem('meta', {
+  const nextFp = computeVaultFingerprint(state);
+  if (lastPersistedFingerprint === nextFp) {
+    return;
+  }
+
+  const db = await openVaultDb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(
+      ['folders', 'files', 'api_keys', 'accounts', 'meta'],
+      'readwrite'
+    );
+
+    const foldersStore = tx.objectStore('folders');
+    foldersStore.clear();
+    for (const item of state.folders) foldersStore.put(item);
+
+    const filesStore = tx.objectStore('files');
+    filesStore.clear();
+    for (const item of state.files) filesStore.put(item);
+
+    const keysStore = tx.objectStore('api_keys');
+    keysStore.clear();
+    for (const item of state.apiKeys) keysStore.put(item);
+
+    const accountsStore = tx.objectStore('accounts');
+    accountsStore.clear();
+    for (const item of state.accounts) accountsStore.put(item);
+
+    tx.objectStore('meta').put({
       key: 'vault_snapshot_meta',
       vaultId: state.vaultId || null,
       settings: state.settings,
@@ -117,11 +172,18 @@ export async function persistSnapshotToOfflineVault(state: VaultState): Promise<
       providersCatalog: state.providersCatalog,
       aiAuditLog: state.aiAuditLog,
       savedAt: new Date().toISOString(),
-    }),
-  ]);
+    });
+
+    tx.oncomplete = () => {
+      lastPersistedFingerprint = nextFp;
+      resolve();
+    };
+    tx.onerror = () => reject(tx.error);
+  });
 }
 
 export async function clearAllOfflineStores(): Promise<void> {
+  lastPersistedFingerprint = null;
   const db = await openVaultDb();
   const storeNames = ['folders', 'files', 'blobs', 'api_keys', 'accounts', 'sync_queue', 'meta'];
   return new Promise((resolve, reject) => {
@@ -149,6 +211,7 @@ export async function ensureOfflineVaultMatchesId(expectedVaultId: string): Prom
 export async function loadOfflineSnapshot(): Promise<VaultState | null> {
   const meta = await getStoreItem<{
     key: string;
+    vaultId?: string | null;
     settings: VaultState['settings'];
     summary: VaultState['summary'];
     providersCatalog: VaultState['providersCatalog'];
@@ -157,18 +220,18 @@ export async function loadOfflineSnapshot(): Promise<VaultState | null> {
 
   if (!meta) return null;
 
-  const [folders, files, apiKeys, accounts] = await Promise.all([
+  const [folders, files, apiKeys, accounts, blobKeys] = await Promise.all([
     getAllStoreItems<FolderItem>('folders'),
     getAllStoreItems<FileItem>('files'),
     getAllStoreItems<AiApiKey>('api_keys'),
     getAllStoreItems<StorageAccount>('accounts'),
+    getAllStoreKeys('blobs'),
   ]);
 
-  const cachedBlobIds = new Set(
-    (await getAllStoreItems<{ id: string }>('blobs')).map((b) => b.id)
-  );
+  const cachedBlobIds = new Set(blobKeys);
 
   return {
+    vaultId: meta.vaultId || undefined,
     settings: meta.settings,
     summary: meta.summary,
     providersCatalog: meta.providersCatalog || [],
@@ -183,17 +246,23 @@ export async function loadOfflineSnapshot(): Promise<VaultState | null> {
   };
 }
 
-export async function saveOfflineBlob(fileId: string, blob: Blob, updatedAt: string): Promise<void> {
+export async function saveOfflineBlob(
+  fileId: string,
+  blob: Blob,
+  updatedAt: string
+): Promise<void> {
   await putStoreItem('blobs', { id: fileId, blob, updatedAt });
 }
 
-export async function getOfflineBlob(fileId: string): Promise<{ id: string; blob: Blob; updatedAt: string } | null> {
+export async function getOfflineBlob(
+  fileId: string
+): Promise<{ id: string; blob: Blob; updatedAt: string } | null> {
   return getStoreItem('blobs', fileId);
 }
 
 export async function getCachedBlobIds(): Promise<Set<string>> {
-  const all = await getAllStoreItems<{ id: string }>('blobs');
-  return new Set(all.map((b) => b.id));
+  const keys = await getAllStoreKeys('blobs');
+  return new Set(keys);
 }
 
 export async function enqueueOfflineAction(action: SyncQueueAction): Promise<void> {

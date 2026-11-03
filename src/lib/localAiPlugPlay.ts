@@ -83,47 +83,72 @@ async function fetchWithTimeout(
 
 export async function detectLocalAiRuntimes(
   apiKey?: string,
-  customEndpoint?: string
+  customEndpoint?: string,
+  options?: { passiveMount?: boolean }
 ): Promise<LocalDiscoverySummary> {
   const modelsMap = new Map<string, DetectedLocalModel>();
   const runtimeSet = new Set<string>();
   let bridgeRunning = false;
   let bridgeOnlineSync = false;
 
+  const cleanBase = normalizeLocalEndpointUrl(
+    customEndpoint || getSavedCustomLocalAiUrl()
+  );
+  const isMobile =
+    typeof navigator !== 'undefined' &&
+    /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
+  const isRemoteHttps =
+    typeof window !== 'undefined' &&
+    window.location.protocol === 'https:' &&
+    window.location.hostname !== 'localhost' &&
+    window.location.hostname !== '127.0.0.1';
+
+  // Avoid unsolicited localhost port-scan errors on HTTPS / mobile tab mount unless user saved a custom URL or clicked Scan
+  if (options?.passiveMount && (isMobile || isRemoteHttps) && !cleanBase) {
+    return {
+      bridgeRunning: false,
+      bridgeOnlineSync: false,
+      detectedRuntimes: [],
+      models: [],
+    };
+  }
+
   // 1. Probe Cloudy Local Plug & Play Bridge (127.0.0.1:8765) — CORS-free for all local runtimes
-  try {
-    const headers: Record<string, string> = {};
-    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-    const res = await fetchWithTimeout(
-      'http://127.0.0.1:8765/api/v1/ai/local-models',
-      { headers },
-      1800
-    );
-    if (res.ok) {
-      const data = await res.json();
-      if (data?.ok) {
-        bridgeRunning = true;
-        bridgeOnlineSync = Boolean(data.onlineSyncConnected);
-        for (const rt of data.runtimes || []) {
-          if (rt?.name) runtimeSet.add(String(rt.name));
-        }
-        for (const m of data.models || []) {
-          const uid = `${m.provider}:${m.id}`;
-          modelsMap.set(uid, {
-            uid,
-            id: m.id,
-            name: m.name || m.id,
-            provider: m.provider || 'ollama',
-            providerName: m.providerName || 'Local AI',
-            endpoint: m.endpoint || 'http://127.0.0.1:11434',
-            kind: m.kind === 'ollama' ? 'ollama' : 'openai',
-            viaBridge: true,
-          });
+  if (!isMobile) {
+    try {
+      const headers: Record<string, string> = {};
+      if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+      const res = await fetchWithTimeout(
+        'http://127.0.0.1:8765/api/v1/ai/local-models',
+        { headers },
+        1100
+      );
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.ok) {
+          bridgeRunning = true;
+          bridgeOnlineSync = Boolean(data.onlineSyncConnected);
+          for (const rt of data.runtimes || []) {
+            if (rt?.name) runtimeSet.add(String(rt.name));
+          }
+          for (const m of data.models || []) {
+            const uid = `${m.provider}:${m.id}`;
+            modelsMap.set(uid, {
+              uid,
+              id: m.id,
+              name: m.name || m.id,
+              provider: m.provider || 'ollama',
+              providerName: m.providerName || 'Local AI',
+              endpoint: m.endpoint || 'http://127.0.0.1:11434',
+              kind: m.kind === 'ollama' ? 'ollama' : 'openai',
+              viaBridge: true,
+            });
+          }
         }
       }
+    } catch {
+      // Bridge not running — direct runtime probes below still work
     }
-  } catch {
-    // Bridge not running — direct runtime probes below still work
   }
 
   // 2. Direct Browser Probes (Ollama, LM Studio, llama.cpp, Jan + optional custom URL)
@@ -132,14 +157,18 @@ export async function detectLocalAiRuntimes(
     name: string;
     base: string;
     kind: 'ollama' | 'openai';
-  }> = [
-    { id: 'ollama', name: 'Ollama', base: 'http://127.0.0.1:11434', kind: 'ollama' },
-    { id: 'lmstudio', name: 'LM Studio', base: 'http://127.0.0.1:1234', kind: 'openai' },
-    { id: 'llamacpp', name: 'llama.cpp', base: 'http://127.0.0.1:8080', kind: 'openai' },
-    { id: 'jan', name: 'Jan AI', base: 'http://127.0.0.1:1337', kind: 'openai' },
-  ];
+  }> = isMobile
+    ? [
+        // Termux / PocketPal local Ollama if running on Android
+        { id: 'ollama', name: 'Ollama', base: 'http://127.0.0.1:11434', kind: 'ollama' },
+      ]
+    : [
+        { id: 'ollama', name: 'Ollama', base: 'http://127.0.0.1:11434', kind: 'ollama' },
+        { id: 'lmstudio', name: 'LM Studio', base: 'http://127.0.0.1:1234', kind: 'openai' },
+        { id: 'llamacpp', name: 'llama.cpp', base: 'http://127.0.0.1:8080', kind: 'openai' },
+        { id: 'jan', name: 'Jan AI', base: 'http://127.0.0.1:1337', kind: 'openai' },
+      ];
 
-  const cleanBase = normalizeLocalEndpointUrl(customEndpoint || getSavedCustomLocalAiUrl());
   if (cleanBase) {
     directTargets.push({
       id: 'custom',

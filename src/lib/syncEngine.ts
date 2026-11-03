@@ -32,7 +32,7 @@ function filterRealAccounts(accounts: StorageAccount[]): StorageAccount[] {
   );
 }
 
-function sanitizeOfflineSnapshot(snap: VaultState): VaultState {
+export function sanitizeOfflineSnapshot(snap: VaultState): VaultState {
   const realAccounts = filterRealAccounts(snap.accounts);
   const totalQuotaBytes = realAccounts.reduce((s, a) => s + (a.quotaBytes || 0), 0);
   const totalUsedBytes = realAccounts.reduce((s, a) => s + (a.usedBytes || 0), 0);
@@ -57,6 +57,9 @@ export interface SyncVaultResult {
 }
 
 let inFlightOnlineSync: Promise<SyncVaultResult> | null = null;
+let bgBlobJobRunning = false;
+const failedBlobCooldownMap = new Map<string, number>();
+const BLOB_RETRY_COOLDOWN_MS = 10 * 60 * 1000;
 
 export async function syncVaultState(
   forceOfflineMode: boolean,
@@ -93,11 +96,17 @@ export async function syncVaultState(
 
 async function runOnlineSyncCycle(forceFresh = false): Promise<SyncVaultResult> {
   try {
-    const [localFilesBefore, localFoldersBefore] = await Promise.all([
-      getAllStoreItems<FileItem>('files').catch(() => []),
-      getAllStoreItems<FolderItem>('folders').catch(() => []),
-    ]);
     const queue = await getOfflineQueue();
+    let localFilesBefore: FileItem[] = [];
+    let localFoldersBefore: FolderItem[] = [];
+
+    if (queue.length > 0) {
+      [localFilesBefore, localFoldersBefore] = await Promise.all([
+        getAllStoreItems<FileItem>('files').catch(() => []),
+        getAllStoreItems<FolderItem>('folders').catch(() => []),
+      ]);
+    }
+
     let flushedQueueCount = 0;
 
     for (const action of queue) {
@@ -188,43 +197,38 @@ async function runOnlineSyncCycle(forceFresh = false): Promise<SyncVaultResult> 
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = sanitizeOfflineSnapshot((await res.json()) as VaultState);
 
-    const remainingQueue = await getOfflineQueue();
-    const pendingFileIds = new Set(
-      remainingQueue
-        .filter((q) => (q.type === 'upload_file' || q.type === 'create_note') && q.payload?.id)
-        .map((q) => String(q.payload.id))
-    );
-    const pendingFolderIds = new Set(
-      remainingQueue
-        .filter((q) => q.type === 'create_folder' && q.payload?.id)
-        .map((q) => String(q.payload.id))
-    );
+    const remainingQueue = queue.length > 0 ? await getOfflineQueue() : [];
+    let combinedFiles = data.files;
+    let combinedFolders = data.folders;
 
-    const serverFileIds = new Set(data.files.map((f) => f.id));
-    const preservedPendingFiles = localFilesBefore.filter(
-      (lf) => pendingFileIds.has(lf.id) && !serverFileIds.has(lf.id)
-    );
-    const combinedFiles = [...preservedPendingFiles, ...data.files];
+    if (remainingQueue.length > 0) {
+      const pendingFileIds = new Set(
+        remainingQueue
+          .filter(
+            (q) =>
+              (q.type === 'upload_file' || q.type === 'create_note') &&
+              q.payload?.id
+          )
+          .map((q) => String(q.payload.id))
+      );
+      const pendingFolderIds = new Set(
+        remainingQueue
+          .filter((q) => q.type === 'create_folder' && q.payload?.id)
+          .map((q) => String(q.payload.id))
+      );
 
-    const serverFolderIds = new Set(data.folders.map((f) => f.id));
-    const preservedPendingFolders = localFoldersBefore.filter(
-      (fd) => pendingFolderIds.has(fd.id) && !serverFolderIds.has(fd.id)
-    );
-    const combinedFolders = [...preservedPendingFolders, ...data.folders];
+      const serverFileIds = new Set(data.files.map((f) => f.id));
+      const preservedPendingFiles = localFilesBefore.filter(
+        (lf) => pendingFileIds.has(lf.id) && !serverFileIds.has(lf.id)
+      );
+      combinedFiles = [...preservedPendingFiles, ...data.files];
 
-    await persistSnapshotToOfflineVault({
-      ...data,
-      folders: combinedFolders,
-      files: combinedFiles,
-    });
-    for (const pf of preservedPendingFiles) {
-      await putStoreItem('files', pf);
+      const serverFolderIds = new Set(data.folders.map((f) => f.id));
+      const preservedPendingFolders = localFoldersBefore.filter(
+        (fd) => pendingFolderIds.has(fd.id) && !serverFolderIds.has(fd.id)
+      );
+      combinedFolders = [...preservedPendingFolders, ...data.folders];
     }
-    for (const pfd of preservedPendingFolders) {
-      await putStoreItem('folders', pfd);
-    }
-
-    await cacheOfflinePinnedBlobs(data.files);
 
     const cachedIds = await getCachedBlobIds();
     const enrichedFiles = combinedFiles.map((f) => ({
@@ -232,8 +236,20 @@ async function runOnlineSyncCycle(forceFresh = false): Promise<SyncVaultResult> 
       offlineCached: cachedIds.has(f.id) || Boolean(f.textContent),
     }));
 
+    const nextState: VaultState = {
+      ...data,
+      folders: combinedFolders,
+      files: enrichedFiles,
+    };
+
+    // Persist metadata non-destructively (skips IndexedDB rewrite if fingerprint unchanged)
+    persistSnapshotToOfflineVault(nextState).catch(() => {});
+
+    // Warm offline blobs asynchronously in the background — NEVER block UI state updates!
+    scheduleBackgroundBlobCache(data.files, cachedIds);
+
     return {
-      state: { ...data, folders: combinedFolders, files: enrichedFiles },
+      state: nextState,
       isOffline: false,
       pendingQueueCount: remainingQueue.length,
       flushedQueueCount,
@@ -258,23 +274,60 @@ async function runOnlineSyncCycle(forceFresh = false): Promise<SyncVaultResult> 
   }
 }
 
-async function cacheOfflinePinnedBlobs(files: FileItem[]): Promise<void> {
-  const pinned = files.filter(
-    (f) => !f.trashed && f.offlinePinned !== false && f.size <= 15 * 1024 * 1024
-  );
-  await Promise.all(
-    pinned.slice(0, 25).map(async (f) => {
-      try {
-        const existing = await getOfflineBlob(f.id);
-        if (existing && existing.updatedAt === f.updatedAt) return;
-        const resp = await apiFetch(`/api/files/${f.id}/blob`);
-        if (resp.ok) {
-          const blob = await resp.blob();
-          await saveOfflineBlob(f.id, blob, f.updatedAt);
-        }
-      } catch {
-        // Ignore transient cache miss
-      }
+function scheduleBackgroundBlobCache(
+  files: FileItem[],
+  knownCachedIds: Set<string>
+): void {
+  if (bgBlobJobRunning || typeof window === 'undefined') return;
+
+  const nowMs = Date.now();
+  const candidates = files
+    .filter((f) => {
+      if (f.trashed || f.offlinePinned === false) return false;
+      if (f.importedRemote) return false; // Cache imported external files on demand when opened/downloaded
+      if (f.size > 10 * 1024 * 1024) return false;
+      const failKey = `${f.id}:${f.updatedAt}`;
+      const failedAt = failedBlobCooldownMap.get(failKey);
+      if (failedAt && nowMs - failedAt < BLOB_RETRY_COOLDOWN_MS) return false;
+      return !knownCachedIds.has(f.id);
     })
-  );
+    .slice(0, 12);
+
+  if (candidates.length === 0) return;
+
+  bgBlobJobRunning = true;
+  window.setTimeout(async () => {
+    try {
+      for (const f of candidates) {
+        if (typeof navigator !== 'undefined' && !navigator.onLine) break;
+        const failKey = `${f.id}:${f.updatedAt}`;
+        try {
+          const existing = await getOfflineBlob(f.id);
+          if (existing && existing.updatedAt === f.updatedAt) continue;
+
+          // Zero-network fast path if inline textContent is already in state
+          if (typeof f.textContent === 'string') {
+            const localBlob = new Blob([f.textContent], {
+              type: f.mimeType || 'text/plain',
+            });
+            await saveOfflineBlob(f.id, localBlob, f.updatedAt);
+            continue;
+          }
+
+          const resp = await apiFetch(`/api/files/${f.id}/blob`);
+          if (resp.ok) {
+            const blob = await resp.blob();
+            await saveOfflineBlob(f.id, blob, f.updatedAt);
+            failedBlobCooldownMap.delete(failKey);
+          } else {
+            failedBlobCooldownMap.set(failKey, Date.now());
+          }
+        } catch {
+          failedBlobCooldownMap.set(failKey, Date.now());
+        }
+      }
+    } finally {
+      bgBlobJobRunning = false;
+    }
+  }, 200);
 }

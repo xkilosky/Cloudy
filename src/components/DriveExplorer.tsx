@@ -102,10 +102,14 @@ export const DriveExplorer: React.FC<DriveExplorerProps> = ({
 
   const [showFolderModal, setShowFolderModal] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const folderSubmitLockRef = useRef(false);
 
   const [showNoteModal, setShowNoteModal] = useState(false);
   const [noteName, setNoteName] = useState('');
   const [noteContent, setNoteContent] = useState('');
+  const [creatingNote, setCreatingNote] = useState(false);
+  const noteSubmitLockRef = useRef(false);
 
   const rawQuota = vault.summary.totalQuotaBytes || 0;
   const totalUsed = vault.summary.totalUsedBytes || 0;
@@ -200,25 +204,40 @@ export const DriveExplorer: React.FC<DriveExplorerProps> = ({
 
   const handleSubmitFolder = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newFolderName.trim()) return;
-    await onCreateFolder(newFolderName.trim(), currentFolderId);
+    const trimmed = newFolderName.trim();
+    if (!trimmed || folderSubmitLockRef.current) return;
+    folderSubmitLockRef.current = true;
+    setCreatingFolder(true);
     setNewFolderName('');
     setShowFolderModal(false);
+    try {
+      await onCreateFolder(trimmed, currentFolderId);
+    } finally {
+      folderSubmitLockRef.current = false;
+      setCreatingFolder(false);
+    }
   };
 
   const handleSubmitNote = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!noteName.trim()) return;
-    const finalName = noteName.includes('.')
-      ? noteName.trim()
-      : `${noteName.trim()}.md`;
+    const rawTitle = noteName.trim();
+    if (!rawTitle || noteSubmitLockRef.current) return;
+    noteSubmitLockRef.current = true;
+    setCreatingNote(true);
+    const finalName = rawTitle.includes('.') ? rawTitle : `${rawTitle}.md`;
     const mime = finalName.endsWith('.json')
       ? 'application/json'
       : 'text/markdown';
-    await onCreateNote(finalName, noteContent, mime, 'note', currentFolderId);
+    const contentSnap = noteContent;
     setNoteName('');
     setNoteContent('');
     setShowNoteModal(false);
+    try {
+      await onCreateNote(finalName, contentSnap, mime, 'note', currentFolderId);
+    } finally {
+      noteSubmitLockRef.current = false;
+      setCreatingNote(false);
+    }
   };
 
   return (
@@ -530,95 +549,77 @@ export const DriveExplorer: React.FC<DriveExplorerProps> = ({
             </div>
           )}
 
-        {/* Carpetas (Folders) Grid */}
-        <AnimatePresence mode="popLayout">
-          {visibleFolders.length > 0 && (
-            <motion.section
-              layout
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0 }}
-              className="space-y-3"
-            >
-              <div className="text-[11px] font-medium uppercase tracking-wider text-ink-muted px-0.5">
-                Carpetas · {visibleFolders.length}
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2.5 sm:gap-3">
-                {visibleFolders.map((folder, idx) => {
-                  const count = folderCounts.get(folder.id) || 0;
-                  return (
-                    <motion.div
-                      layout
-                      key={folder.id}
-                      initial={{ opacity: 0, y: 10 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0, scale: 0.96 }}
-                      transition={{
-                        duration: 0.22,
-                        delay: Math.min(idx * 0.03, 0.18),
-                      }}
-                      whileHover={{ y: -2 }}
-                      whileTap={{ scale: 0.985 }}
-                      onClick={() => {
-                        if (viewFilter === 'active') onSelectFolder(folder.id);
-                      }}
-                      className="group rounded-2xl bg-surface hover:bg-elevated/90 border border-line hover:border-line-strong p-3.5 sm:p-4 flex items-center justify-between gap-2.5 cursor-pointer shadow-card transition-colors"
-                    >
-                      <div className="flex items-center gap-3 min-w-0">
-                        <div className="w-9 h-9 rounded-xl bg-[#D97757]/15 text-[#E58A6B] flex items-center justify-center shrink-0">
-                          <Folder className="w-[18px] h-[18px] fill-[#D97757]/20" />
+        {/* Carpetas (Folders) Grid — GPU-Fast Zero-Layout-Thrash Rendering */}
+        {visibleFolders.length > 0 && (
+          <section className="space-y-3">
+            <div className="text-[11px] font-medium uppercase tracking-wider text-ink-muted px-0.5">
+              Carpetas · {visibleFolders.length}
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2.5 sm:gap-3">
+              {visibleFolders.map((folder) => {
+                const count = folderCounts.get(folder.id) || 0;
+                return (
+                  <div
+                    key={folder.id}
+                    onClick={() => {
+                      if (viewFilter === 'active') onSelectFolder(folder.id);
+                    }}
+                    className="group rounded-2xl bg-surface hover:bg-elevated/90 active:scale-[0.99] border border-line hover:border-line-strong p-3.5 sm:p-4 flex items-center justify-between gap-2.5 cursor-pointer shadow-card transition-[background-color,border-color,transform] duration-150"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-9 h-9 rounded-xl bg-[#D97757]/15 text-[#E58A6B] flex items-center justify-center shrink-0">
+                        <Folder className="w-[18px] h-[18px] fill-[#D97757]/20" />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-[13.5px] font-medium text-ink truncate">
+                          {folder.name}
                         </div>
-                        <div className="min-w-0">
-                          <div className="text-[13.5px] font-medium text-ink truncate">
-                            {folder.name}
-                          </div>
-                          <div className="text-[11px] text-ink-muted">
-                            {count} {count === 1 ? 'file' : 'files'}
-                          </div>
+                        <div className="text-[11px] text-ink-muted">
+                          {count} {count === 1 ? 'file' : 'files'}
                         </div>
                       </div>
+                    </div>
 
-                      {/* Always accessible on mobile touchscreens; hover-revealed on desktop */}
-                      <div
-                        className="flex items-center gap-1 shrink-0"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        {viewFilter === 'trash' && (
-                          <button
-                            type="button"
-                            onClick={() => onRestoreFolder(folder)}
-                            className="p-2 rounded-xl text-ink-secondary hover:text-[#10A37F] hover:bg-canvas/60 active:bg-canvas/80 transition"
-                            title="Restore carpeta"
-                          >
-                            <RotateCcw className="w-4 h-4" />
-                          </button>
-                        )}
+                    {/* Always accessible on mobile touchscreens; hover-revealed on desktop */}
+                    <div
+                      className="flex items-center gap-1 shrink-0"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {viewFilter === 'trash' && (
                         <button
                           type="button"
-                          onClick={() =>
-                            onTrashOrDeleteFolder(folder, viewFilter === 'trash')
-                          }
-                          className={`${
-                            viewFilter === 'trash'
-                              ? 'opacity-100'
-                              : 'opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100'
-                          } p-2 rounded-xl text-ink-muted hover:text-red-400 hover:bg-canvas/60 active:bg-canvas/80 transition`}
-                          title={
-                            viewFilter === 'trash'
-                              ? 'Delete forever'
-                              : 'Move to trash'
-                          }
+                          onClick={() => onRestoreFolder(folder)}
+                          className="p-2 rounded-xl text-ink-secondary hover:text-[#10A37F] hover:bg-canvas/60 active:bg-canvas/80 transition"
+                          title="Restore carpeta"
                         >
-                          <Trash2 className="w-4 h-4" />
+                          <RotateCcw className="w-4 h-4" />
                         </button>
-                      </div>
-                    </motion.div>
-                  );
-                })}
-              </div>
-            </motion.section>
-          )}
-        </AnimatePresence>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onTrashOrDeleteFolder(folder, viewFilter === 'trash')
+                        }
+                        className={`${
+                          viewFilter === 'trash'
+                            ? 'opacity-100'
+                            : 'opacity-100 sm:opacity-0 sm:group-hover:opacity-100 focus:opacity-100'
+                        } p-2 rounded-xl text-ink-muted hover:text-red-400 hover:bg-canvas/60 active:bg-canvas/80 transition`}
+                        title={
+                          viewFilter === 'trash'
+                            ? 'Delete forever'
+                            : 'Move to trash'
+                        }
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
 
         {/* Files List */}
         <section className="space-y-3">
@@ -627,9 +628,7 @@ export const DriveExplorer: React.FC<DriveExplorerProps> = ({
           </div>
 
           {visibleFiles.length === 0 ? (
-            <motion.div
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
+            <div
               onClick={() =>
                 viewFilter === 'active' && fileInputRef.current?.click()
               }
@@ -652,113 +651,100 @@ export const DriveExplorer: React.FC<DriveExplorerProps> = ({
                   </p>
                 )}
               </div>
-            </motion.div>
+            </div>
           ) : (
-            <motion.div
-              layout
-              className="rounded-2xl border border-line bg-surface shadow-card divide-y divide-line overflow-hidden"
-            >
-              <AnimatePresence initial={false}>
-                {visibleFiles.map((file, idx) => {
-                  const { Icon, color, bg } = getFileVisual(
-                    file.mimeType,
-                    file.name
-                  );
-                  return (
-                    <motion.div
-                      layout
-                      key={file.id}
-                      initial={{ opacity: 0, y: 8 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0, height: 0 }}
-                      transition={{
-                        duration: 0.2,
-                        delay: Math.min(idx * 0.025, 0.15),
-                      }}
-                      onClick={() => onOpenFile(file)}
-                      className="group px-3.5 sm:px-5 py-3.5 hover:bg-elevated/65 active:bg-elevated/80 flex items-center justify-between gap-2.5 sm:gap-4 cursor-pointer transition-colors"
-                    >
-                      <div className="flex items-center gap-3 min-w-0 flex-1">
-                        <div
-                          className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0"
-                          style={{ backgroundColor: bg, color }}
-                        >
-                          <Icon className="w-[18px] h-[18px]" />
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="text-[13.5px] font-medium text-ink flex items-center gap-2 min-w-0">
-                            <span className="truncate">{file.name}</span>
-                            {file.pendingOfflineSync && (
-                              <span className="shrink-0 text-[10px] font-mono px-2 py-0.5 rounded-full bg-[#D97757]/15 text-[#F0A085]">
-                                queued
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-xs text-ink-muted flex items-center gap-1.5 sm:gap-2 mt-0.5 min-w-0">
-                            <span className="font-mono tabular-nums shrink-0">
-                              {formatBytes(file.size)}
-                            </span>
-                            <span className="shrink-0">·</span>
-                            <span className="text-ink-secondary truncate max-w-[135px] sm:max-w-[240px]">
-                              {file.providerName}
-                            </span>
-                            <span className="hidden sm:inline shrink-0">·</span>
-                            <span className="hidden sm:inline shrink-0">
-                              {formatRelativeTime(file.updatedAt)}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-
+            <div className="rounded-2xl border border-line bg-surface shadow-card divide-y divide-line overflow-hidden">
+              {visibleFiles.map((file) => {
+                const { Icon, color, bg } = getFileVisual(
+                  file.mimeType,
+                  file.name
+                );
+                return (
+                  <div
+                    key={file.id}
+                    onClick={() => onOpenFile(file)}
+                    className="group px-3.5 sm:px-5 py-3.5 hover:bg-elevated/65 active:bg-elevated/80 flex items-center justify-between gap-2.5 sm:gap-4 cursor-pointer transition-colors"
+                  >
+                    <div className="flex items-center gap-3 min-w-0 flex-1">
                       <div
-                        className="flex items-center gap-0.5 sm:gap-1 shrink-0"
-                        onClick={(e) => e.stopPropagation()}
+                        className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0"
+                        style={{ backgroundColor: bg, color }}
                       >
-                        {viewFilter === 'trash' ? (
-                          <>
-                            <button
-                              type="button"
-                              onClick={() => onRestoreFile(file)}
-                              className="p-2 rounded-xl text-ink-secondary hover:text-[#10A37F] hover:bg-canvas/50 active:bg-canvas/80 transition"
-                              title="Restore"
-                            >
-                              <RotateCcw className="w-4 h-4" />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => onTrashOrDeleteFile(file, true)}
-                              className="p-2 rounded-xl text-ink-secondary hover:text-red-400 hover:bg-canvas/50 active:bg-canvas/80 transition"
-                              title="Delete permanently"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          </>
-                        ) : (
-                          <>
-                            <button
-                              type="button"
-                              onClick={() => onDownloadFile(file)}
-                              className="p-2 rounded-xl text-ink-muted hover:text-ink hover:bg-canvas/50 active:bg-canvas/80 transition"
-                              title="Download"
-                            >
-                              <Download className="w-4 h-4" />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => onTrashOrDeleteFile(file, false)}
-                              className="p-2 rounded-xl text-ink-muted hover:text-red-400 hover:bg-canvas/50 active:bg-canvas/80 transition"
-                              title="Move to trash"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          </>
-                        )}
+                        <Icon className="w-[18px] h-[18px]" />
                       </div>
-                    </motion.div>
-                  );
-                })}
-              </AnimatePresence>
-            </motion.div>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-[13.5px] font-medium text-ink flex items-center gap-2 min-w-0">
+                          <span className="truncate">{file.name}</span>
+                          {file.pendingOfflineSync && (
+                            <span className="shrink-0 text-[10px] font-mono px-2 py-0.5 rounded-full bg-[#D97757]/15 text-[#F0A085]">
+                              queued
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs text-ink-muted flex items-center gap-1.5 sm:gap-2 mt-0.5 min-w-0">
+                          <span className="font-mono tabular-nums shrink-0">
+                            {formatBytes(file.size)}
+                          </span>
+                          <span className="shrink-0">·</span>
+                          <span className="text-ink-secondary truncate max-w-[135px] sm:max-w-[240px]">
+                            {file.providerName}
+                          </span>
+                          <span className="hidden sm:inline shrink-0">·</span>
+                          <span className="hidden sm:inline shrink-0">
+                            {formatRelativeTime(file.updatedAt)}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div
+                      className="flex items-center gap-0.5 sm:gap-1 shrink-0"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {viewFilter === 'trash' ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => onRestoreFile(file)}
+                            className="p-2 rounded-xl text-ink-secondary hover:text-[#10A37F] hover:bg-canvas/50 active:bg-canvas/80 transition"
+                            title="Restore"
+                          >
+                            <RotateCcw className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onTrashOrDeleteFile(file, true)}
+                            className="p-2 rounded-xl text-ink-secondary hover:text-red-400 hover:bg-canvas/50 active:bg-canvas/80 transition"
+                            title="Delete permanently"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => onDownloadFile(file)}
+                            className="p-2 rounded-xl text-ink-muted hover:text-ink hover:bg-canvas/50 active:bg-canvas/80 transition"
+                            title="Download"
+                          >
+                            <Download className="w-4 h-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onTrashOrDeleteFile(file, false)}
+                            className="p-2 rounded-xl text-ink-muted hover:text-red-400 hover:bg-canvas/50 active:bg-canvas/80 transition"
+                            title="Move to trash"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           )}
         </section>
       </div>
@@ -811,9 +797,10 @@ export const DriveExplorer: React.FC<DriveExplorerProps> = ({
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2.5 sm:py-2 rounded-full bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold shadow-glow transition"
+                  disabled={creatingFolder || !newFolderName.trim()}
+                  className="px-5 py-2.5 sm:py-2 rounded-full bg-accent hover:bg-accent-hover disabled:opacity-55 text-accent-fg text-xs font-semibold shadow-glow transition"
                 >
-                  Create Carpeta
+                  {creatingFolder ? 'Creating...' : 'Create Carpeta'}
                 </button>
               </div>
             </motion.form>
@@ -876,9 +863,10 @@ export const DriveExplorer: React.FC<DriveExplorerProps> = ({
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2.5 sm:py-2 rounded-full bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold shadow-glow transition"
+                  disabled={creatingNote || !noteName.trim()}
+                  className="px-5 py-2.5 sm:py-2 rounded-full bg-accent hover:bg-accent-hover disabled:opacity-55 text-accent-fg text-xs font-semibold shadow-glow transition"
                 >
-                  Save Note
+                  {creatingNote ? 'Saving...' : 'Save Note'}
                 </button>
               </div>
             </motion.form>

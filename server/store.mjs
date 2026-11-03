@@ -251,18 +251,20 @@ function pushRemoteVaultState(vaultId, db) {
   const nextPromise = prev
     .catch(() => {})
     .then(async () => {
-      await fetch(`${sbUrl}/rest/v1/cloudy_vault_states?on_conflict=vault_id`, {
-        method: 'POST',
-        headers: {
-          apikey: sbKey,
-          Authorization: `Bearer ${sbKey}`,
-          'Content-Type': 'application/json',
-          Prefer: 'resolution=merge-duplicates',
-        },
-        body: snapshotJson,
-        signal: AbortSignal.timeout(4000),
-      });
-      await syncVaultRelationalTables(vaultId, db);
+      await Promise.allSettled([
+        fetch(`${sbUrl}/rest/v1/cloudy_vault_states?on_conflict=vault_id`, {
+          method: 'POST',
+          headers: {
+            apikey: sbKey,
+            Authorization: `Bearer ${sbKey}`,
+            'Content-Type': 'application/json',
+            Prefer: 'resolution=merge-duplicates',
+          },
+          body: snapshotJson,
+          signal: AbortSignal.timeout(4000),
+        }),
+        syncVaultRelationalTables(vaultId, db),
+      ]);
     })
     .catch(() => {})
     .finally(() => {

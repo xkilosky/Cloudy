@@ -162,6 +162,7 @@ export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
       urlOverride?: string;
       hintOverride?: CustomAppCapabilityHint;
       selectFirst?: boolean;
+      passiveMount?: boolean;
     }) => {
       setScanningApps(true);
       setAutoConnectBanner(null);
@@ -172,6 +173,7 @@ export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
           customAppName: opts?.nameOverride ?? customAppName,
           customAppUrl: opts?.urlOverride ?? customAppPortOrUrl,
           capabilityHint: opts?.hintOverride ?? capabilityHint,
+          passiveMount: opts?.passiveMount,
         });
         setBridgeRunning(res.bridgeRunning);
         setDetectedApps(res.apps);
@@ -190,12 +192,13 @@ export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
   );
 
   const scanLocalAiModels = useCallback(
-    async (customOverride?: string) => {
+    async (customOverride?: string, passiveMount = false) => {
       setScanningModels(true);
       try {
         const res = await detectLocalAiRuntimes(
           selectedKeyObj?.key,
-          customOverride ?? customUrlInput
+          customOverride ?? customUrlInput,
+          { passiveMount }
         );
         setBridgeRunning(res.bridgeRunning);
         setBridgeOnlineSync(res.bridgeOnlineSync);
@@ -214,8 +217,8 @@ export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
   );
 
   useEffect(() => {
-    scanLocalAiModels();
-    runAppScan();
+    scanLocalAiModels(undefined, true);
+    runAppScan({ passiveMount: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedKeyObj?.id]);
 
