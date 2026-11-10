@@ -41,7 +41,7 @@ interface TopBarProps {
 const TAB_TITLES: Record<NavTab, string> = {
   files: 'Files & Carpetas',
   providers: 'Cloud Pool',
-  'ai-keys': 'Local AI Studio',
+  'ai-keys': 'AI & MCP Studio',
   database: 'Database & Auth',
   android: 'Android App',
 };
@@ -121,9 +121,25 @@ export const TopBar: React.FC<TopBarProps> = ({
     }
   };
 
+  const activeFilesCount = vault.files.filter((f) => !f.trashed).length;
+  const activeFoldersCount = vault.folders.filter((f) => !f.trashed).length;
+
+  const desktopSubtitle =
+    activeTab === 'files'
+      ? `${activeFoldersCount} carpeta${activeFoldersCount === 1 ? '' : 's'} · ${activeFilesCount} file${activeFilesCount === 1 ? '' : 's'}`
+      : activeTab === 'providers'
+        ? `${vault.accounts.length} cloud${vault.accounts.length === 1 ? '' : 's'} · ${rawQuota > 0 ? formatBytes(rawQuota, 0) : '0 GB'} pooled`
+        : activeTab === 'ai-keys'
+          ? `${vault.apiKeys.length} key${vault.apiKeys.length === 1 ? '' : 's'} · Streamable HTTP MCP`
+          : activeTab === 'database'
+            ? authUser
+              ? authUser.email
+              : 'Local Guest Vault'
+            : 'Offline WebAPK & Capacitor';
+
   return (
     <header className="sticky top-0 z-30 pt-safe bg-canvas/96 sm:bg-canvas/85 sm:backdrop-blur-xl border-b border-line">
-      <div className="relative h-14 sm:h-16 px-3.5 sm:px-8 flex items-center justify-between gap-2.5 sm:gap-4">
+      <div className="max-w-6xl mx-auto relative h-14 sm:h-16 px-3.5 sm:px-6 lg:px-8 flex items-center justify-between gap-2.5 sm:gap-4">
         {/* Mobile Brand + Active View Label */}
         <button
           type="button"
@@ -150,8 +166,19 @@ export const TopBar: React.FC<TopBarProps> = ({
           </div>
         </button>
 
+        {/* Desktop Active Section Anchor */}
+        <div className="hidden lg:flex items-center gap-3 min-w-0 shrink-0">
+          <h2 className="text-[14.5px] font-semibold text-ink tracking-tight">
+            {TAB_TITLES[activeTab]}
+          </h2>
+          <span className="h-3.5 w-px bg-line-strong" />
+          <span className="text-xs text-ink-muted truncate max-w-[240px]">
+            {desktopSubtitle}
+          </span>
+        </div>
+
         {/* Desktop / Tablet Pill Search Input */}
-        <div className="hidden sm:block relative flex-1 max-w-md group">
+        <div className="hidden sm:block relative flex-1 max-w-sm lg:max-w-md lg:ml-auto group">
           <Search className="w-4 h-4 text-ink-muted group-focus-within:text-accent absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none transition-colors" />
           <input
             ref={desktopInputRef}

@@ -404,8 +404,8 @@ export const DatabaseView: React.FC<DatabaseViewProps> = ({
   };
 
   return (
-    <div className="flex-1 px-3.5 sm:px-8 py-5 sm:py-7 min-w-0">
-      <div className="max-w-5xl mx-auto space-y-6 pb-8 min-w-0">
+    <div className="flex-1 min-w-0">
+      <div className="studio-container space-y-6 pb-8">
         {/* Guest Upgrade Callout */}
         {!authUser && (
           <motion.div

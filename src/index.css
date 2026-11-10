@@ -4,71 +4,71 @@
 
 :root,
 [data-theme='deepseek'] {
-  --bg-sidebar: #111318;
-  --bg-canvas: #171920;
-  --bg-surface: #20232c;
-  --bg-elevated: #282c37;
+  --bg-sidebar: #101218;
+  --bg-canvas: #151821;
+  --bg-surface: #1d212d;
+  --bg-elevated: #252a38;
   --border-subtle: rgba(255, 255, 255, 0.075);
-  --border-strong: rgba(255, 255, 255, 0.14);
-  --text-primary: #eceef2;
-  --text-secondary: #a0a6b5;
-  --text-muted: #6c7385;
+  --border-strong: rgba(255, 255, 255, 0.145);
+  --text-primary: #f1f3f8;
+  --text-secondary: #a4abc0;
+  --text-muted: #6e768c;
   --accent: #4d6bfe;
   --accent-hover: #647eff;
   --accent-fg: #ffffff;
   --accent-soft: rgba(77, 107, 254, 0.14);
-  --accent-glow: rgba(77, 107, 254, 0.32);
+  --accent-glow: rgba(77, 107, 254, 0.28);
 }
 
 [data-theme='claude'] {
-  --bg-sidebar: #181715;
-  --bg-canvas: #201f1d;
-  --bg-surface: #292724;
-  --bg-elevated: #33302c;
+  --bg-sidebar: #171614;
+  --bg-canvas: #1f1e1b;
+  --bg-surface: #282623;
+  --bg-elevated: #322f2b;
   --border-subtle: rgba(245, 238, 228, 0.085);
-  --border-strong: rgba(245, 238, 228, 0.15);
-  --text-primary: #f3efea;
-  --text-secondary: #b4aea3;
-  --text-muted: #7e7970;
+  --border-strong: rgba(245, 238, 228, 0.155);
+  --text-primary: #f5f1ec;
+  --text-secondary: #b7b0a5;
+  --text-muted: #827c72;
   --accent: #d97757;
-  --accent-hover: #e4896b;
+  --accent-hover: #e5896b;
   --accent-fg: #ffffff;
   --accent-soft: rgba(217, 119, 87, 0.15);
-  --accent-glow: rgba(217, 119, 87, 0.3);
+  --accent-glow: rgba(217, 119, 87, 0.28);
 }
 
 [data-theme='chatgpt'] {
-  --bg-sidebar: #171717;
-  --bg-canvas: #212121;
-  --bg-surface: #2a2a2a;
-  --bg-elevated: #333333;
-  --border-subtle: rgba(255, 255, 255, 0.085);
+  --bg-sidebar: #161616;
+  --bg-canvas: #1f1f1f;
+  --bg-surface: #282828;
+  --bg-elevated: #323232;
+  --border-subtle: rgba(255, 255, 255, 0.08);
   --border-strong: rgba(255, 255, 255, 0.15);
-  --text-primary: #ececec;
-  --text-secondary: #b4b4b4;
-  --text-muted: #7c7c7c;
+  --text-primary: #f0f0f0;
+  --text-secondary: #b5b5b5;
+  --text-muted: #7d7d7d;
   --accent: #10a37f;
   --accent-hover: #14b890;
   --accent-fg: #ffffff;
   --accent-soft: rgba(16, 163, 127, 0.15);
-  --accent-glow: rgba(16, 163, 127, 0.3);
+  --accent-glow: rgba(16, 163, 127, 0.28);
 }
 
 [data-theme='qwen'] {
-  --bg-sidebar: #13121a;
-  --bg-canvas: #1a1924;
-  --bg-surface: #232230;
-  --bg-elevated: #2d2b3e;
-  --border-subtle: rgba(255, 255, 255, 0.085);
+  --bg-sidebar: #121119;
+  --bg-canvas: #181722;
+  --bg-surface: #22202f;
+  --bg-elevated: #2c293d;
+  --border-subtle: rgba(255, 255, 255, 0.08);
   --border-strong: rgba(255, 255, 255, 0.15);
-  --text-primary: #f0eff7;
-  --text-secondary: #a8a5bd;
-  --text-muted: #74708b;
+  --text-primary: #f2f1f9;
+  --text-secondary: #aba7c2;
+  --text-muted: #77738f;
   --accent: #7c5cfc;
   --accent-hover: #8f73ff;
   --accent-fg: #ffffff;
   --accent-soft: rgba(124, 92, 252, 0.15);
-  --accent-glow: rgba(124, 92, 252, 0.32);
+  --accent-glow: rgba(124, 92, 252, 0.3);
 }
 
 @layer base {
@@ -77,6 +77,7 @@
     overflow-x: clip;
     -webkit-tap-highlight-color: transparent;
     -webkit-text-size-adjust: 100%;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
   }
 
   body,
@@ -86,7 +87,9 @@
     overflow-x: clip;
     background-color: var(--bg-canvas);
     color: var(--text-primary);
-    transition: background-color 240ms ease, color 240ms ease;
+    transition: background-color 220ms ease, color 220ms ease;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
 
   button,
@@ -134,13 +137,38 @@
   }
 }
 
+@layer components {
+  .studio-container {
+    @apply max-w-6xl w-full mx-auto px-3.5 sm:px-6 lg:px-8 py-5 sm:py-7 min-w-0;
+  }
+
+  .studio-card {
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    box-shadow:
+      0 1px 2px rgba(0, 0, 0, 0.22),
+      inset 0 1px 0 rgba(255, 255, 255, 0.035);
+    @apply rounded-2xl transition-colors;
+  }
+
+  .studio-card-strong {
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border-strong);
+    box-shadow:
+      0 6px 24px -8px rgba(0, 0, 0, 0.34),
+      inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    @apply rounded-2xl transition-colors;
+  }
+}
+
 @layer utilities {
   .ambient-canvas {
-    background-image: radial-gradient(
-      ellipse 85% 42% at 50% -12%,
-      var(--accent-soft),
-      transparent 72%
-    );
+    background-image:
+      radial-gradient(
+        ellipse 80% 36% at 50% -10%,
+        var(--accent-soft),
+        transparent 70%
+      );
   }
 
   .pt-safe {

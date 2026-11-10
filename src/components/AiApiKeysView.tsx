@@ -9,7 +9,6 @@ import {
   EyeOff,
   Trash2,
   Play,
-  PlugZap,
   Download,
   RefreshCw,
   Send,
@@ -27,6 +26,9 @@ import {
   ShieldCheck,
   Zap,
   ExternalLink,
+  Code2,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import type { AiApiKey, AiTrustLevel, VaultState } from '../types';
 import { formatRelativeTime } from '../lib/format';
@@ -88,6 +90,7 @@ interface TrustMeta {
   summary: string;
   badgeClass: string;
   ringClass: string;
+  dotColor: string;
   icon: React.ComponentType<{ className?: string }>;
 }
 
@@ -95,23 +98,25 @@ const TRUST_LEVEL_OPTIONS: TrustMeta[] = [
   {
     id: 'normal',
     label: 'Normal',
-    subtitle: 'Read & Search',
+    subtitle: 'Read & Search Only',
     toolsCount: 4,
     summary:
-      'Safe read-only access: list carpetas & files, search vault, and read file contents. Blocks edits & deletes.',
+      'Lists carpetas & files, searches vault, reads content. Blocks edits & deletes.',
     badgeClass: 'bg-sky-500/15 text-sky-400 border-sky-500/30',
     ringClass: 'border-sky-500/60 bg-sky-500/10',
+    dotColor: '#38BDF8',
     icon: Shield,
   },
   {
     id: 'medium',
     label: 'Medium',
-    subtitle: 'Create & Edit',
+    subtitle: 'Read + Create & Edit',
     toolsCount: 7,
     summary:
-      'Balanced workspace access: read + create carpetas, save notes, and edit files. Blocks file moves & deletion.',
+      'Creates carpetas, saves notes, updates files. Blocks moves & deletion.',
     badgeClass: 'bg-amber-500/15 text-amber-400 border-amber-500/30',
     ringClass: 'border-amber-500/60 bg-amber-500/10',
+    dotColor: '#F59E0B',
     icon: ShieldAlert,
   },
   {
@@ -120,9 +125,10 @@ const TRUST_LEVEL_OPTIONS: TrustMeta[] = [
     subtitle: 'Full Trusted Agent',
     toolsCount: 10,
     summary:
-      'Full verified control: read, create, edit, organize/move across carpetas, delete files, and inspect Cloud Pool.',
+      'Full access: read, create, edit, move across carpetas, delete & inspect Cloud Pool.',
     badgeClass: 'bg-[#10A37F]/15 text-[#10A37F] border-[#10A37F]/35',
     ringClass: 'border-[#10A37F]/70 bg-[#10A37F]/10',
+    dotColor: '#10A37F',
     icon: ShieldCheck,
   },
 ];
@@ -152,6 +158,8 @@ interface McpHandshakeResult {
   error?: string;
 }
 
+type StudioTab = 'mcp_keys' | 'scanner' | 'chat' | 'rest';
+
 export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
   vault,
   isOffline,
@@ -162,9 +170,7 @@ export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
   onSaveGeneratedNote,
   onRefreshState,
 }) => {
-  const [sectionTab, setSectionTab] = useState<
-    'keys' | 'apps_chat' | 'rest_code'
-  >('keys');
+  const [studioTab, setStudioTab] = useState<StudioTab>('mcp_keys');
 
   // Key generator state
   const [name, setName] = useState('');
@@ -176,6 +182,7 @@ export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
   const [revealedIds, setRevealedIds] = useState<Record<string, boolean>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [snippetTab, setSnippetTab] = useState<'ollama' | 'curl'>('ollama');
+  const [showMcpConfigs, setShowMcpConfigs] = useState(false);
   const [mcpFormatTab, setMcpFormatTab] = useState<
     'fast_json' | 'claude' | 'headers' | 'offline_py'
   >('fast_json');
@@ -191,7 +198,6 @@ export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
     preferredKey?.id || ''
   );
 
-  // Sync selected key if keys list changes
   useEffect(() => {
     if (
       !vault.apiKeys.some((k) => k.id === selectedKeyId) &&
@@ -256,7 +262,6 @@ export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
   const fastMcpUrl = `${origin}/api/mcp?key=${encodeURIComponent(activeKeyToken)}`;
   const bareMcpUrl = `${origin}/api/mcp`;
 
-  // Official 1-click IDE deep links
   const cursorInstallHref = (() => {
     try {
       const cfg = btoa(JSON.stringify({ url: fastMcpUrl }));
@@ -323,9 +328,7 @@ export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
       );
       const initJson = await initRes.json();
       if (!initRes.ok || initJson.error) {
-        throw new Error(
-          initJson?.error?.message || `HTTP ${initRes.status}`
-        );
+        throw new Error(initJson?.error?.message || `HTTP ${initRes.status}`);
       }
 
       const toolsRes = await fetch(
@@ -351,7 +354,8 @@ export const AiApiKeysView: React.FC<AiApiKeysViewProps> = ({
         ok: true,
         latencyMs,
         protocolVersion: initJson?.result?.protocolVersion || '2025-03-26',
-        serverName: initJson?.result?.serverInfo?.name || 'cloudy-xkilo-vault-mcp',
+        serverName:
+          initJson?.result?.serverInfo?.name || 'cloudy-xkilo-vault-mcp',
         trustLevel: selectedKeyTrust,
         tools: toolNames,
       });
@@ -677,643 +681,650 @@ curl -s "${origin}/api/v1/ai/folders" -H "Authorization: Bearer ${activeKeyToken
   const selectedComposerMeta = getTrustMeta(trustLevel);
 
   return (
-    <div className="flex-1 px-3.5 sm:px-8 py-5 sm:py-7 min-w-0">
-      <div className="max-w-5xl mx-auto space-y-6 min-w-0">
-        {/* Top Header */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <h1 className="text-xl font-semibold text-ink tracking-tight">
-                AI Section &amp; MCP Fast Connection
-              </h1>
-              <span className="px-2.5 py-0.5 rounded-full bg-accent-soft text-accent text-[11px] font-semibold">
-                Streamable HTTP MCP
-              </span>
-            </div>
-            <p className="text-xs text-ink-secondary mt-1 leading-relaxed">
-              Generate scoped AI keys with <strong className="text-ink">Normal</strong>,{' '}
-              <strong className="text-ink">Medium</strong>, or{' '}
-              <strong className="text-ink">Proved</strong> trust levels and connect any MCP client in one click.
+    <div className="flex-1 min-w-0">
+      <div className="studio-container space-y-6">
+        {/* Clean Studio Header + Single Primary Navigation Bar */}
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="space-y-1">
+            <h1 className="text-lg sm:text-xl font-semibold text-ink tracking-tight">
+              AI &amp; MCP Fast Connection
+            </h1>
+            <p className="text-xs text-ink-secondary">
+              Connect any MCP or local AI client in seconds with enforced{' '}
+              <span className="text-ink font-medium">Normal</span>,{' '}
+              <span className="text-ink font-medium">Medium</span>, and{' '}
+              <span className="text-ink font-medium">Proved</span> trust levels.
             </p>
           </div>
-        </div>
 
-        {/* SPOTLIGHT GRID: GENERATE KEY (TRUST LEVELS) + MCP FAST CONNECTION */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 min-w-0">
-          {/* LEFT CARD: GENERATE KEY + KEY TRUST LEVEL (Normal / Medium / Proved) */}
-          <form
-            onSubmit={handleGenerateKey}
-            className="lg:col-span-6 rounded-3xl bg-surface border border-line-strong p-4 sm:p-5 shadow-card flex flex-col justify-between gap-4 min-w-0"
-          >
-            <div className="space-y-4">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-9 h-9 rounded-2xl bg-accent-soft text-accent flex items-center justify-center shrink-0">
-                    <KeyRound className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h2 className="text-sm font-semibold text-ink">
-                      Generate Key
-                    </h2>
-                    <p className="text-[11px] text-ink-muted">
-                      Choose Key Trust Level &amp; carpeta access
-                    </p>
-                  </div>
-                </div>
-                <span
-                  className={`px-2.5 py-1 rounded-full border text-[10.5px] font-semibold ${selectedComposerMeta.badgeClass}`}
-                >
-                  {selectedComposerMeta.label} · {selectedComposerMeta.toolsCount} tools
-                </span>
-              </div>
-
-              {/* Key Name + Folder Scope */}
-              <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5">
-                <input
-                  type="text"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="Key name (optional, e.g. Cursor / Claude)"
-                  className="sm:col-span-7 px-3.5 py-2.5 rounded-2xl bg-canvas border border-line focus:border-accent focus:outline-none text-xs text-ink placeholder:text-ink-muted"
-                />
-                <select
-                  value={folderRestriction}
-                  onChange={(e) => setFolderRestriction(e.target.value)}
-                  className="sm:col-span-5 px-3 py-2.5 rounded-2xl bg-canvas border border-line text-xs text-ink focus:outline-none truncate"
-                >
-                  <option value="all">Scope: All Carpetas</option>
-                  {vault.folders
-                    .filter((f) => !f.trashed)
-                    .map((f) => (
-                      <option key={f.id} value={f.id}>
-                        Only: {f.name}
-                      </option>
-                    ))}
-                </select>
-              </div>
-
-              {/* Key Trust Level Selector: Normal / Medium / Proved */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted">
-                    Key Trust Level
-                  </span>
-                  <span className="text-[11px] text-ink-secondary">
-                    {selectedComposerMeta.subtitle}
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-3 gap-2">
-                  {TRUST_LEVEL_OPTIONS.map((opt) => {
-                    const Icon = opt.icon;
-                    const active = trustLevel === opt.id;
-                    return (
-                      <button
-                        key={opt.id}
-                        type="button"
-                        onClick={() => setTrustLevel(opt.id)}
-                        className={`p-3 rounded-2xl border text-left transition-all flex flex-col gap-1.5 min-w-0 ${
-                          active
-                            ? `${opt.ringClass} shadow-card`
-                            : 'bg-canvas border-line hover:border-line-strong'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-1">
-                          <Icon
-                            className={`w-4 h-4 shrink-0 ${
-                              active ? 'text-ink' : 'text-ink-muted'
-                            }`}
-                          />
-                          <span className="text-[10px] font-mono text-ink-muted">
-                            {opt.toolsCount}t
-                          </span>
-                        </div>
-                        <div className="text-xs font-semibold text-ink truncate">
-                          {opt.label}
-                        </div>
-                        <div className="text-[10.5px] text-ink-secondary truncate">
-                          {opt.subtitle}
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-
-                <p className="text-[11.5px] text-ink-secondary leading-relaxed px-0.5">
-                  {selectedComposerMeta.summary}
-                </p>
-              </div>
-            </div>
-
-            <div className="space-y-2.5 pt-1">
-              <button
-                type="submit"
-                disabled={creating}
-                className="w-full py-2.5 px-4 rounded-2xl bg-accent hover:bg-accent-hover text-accent-fg font-semibold text-xs inline-flex items-center justify-center gap-2 shadow-glow transition active:scale-[0.99] disabled:opacity-50"
-              >
-                <Plus className="w-4 h-4" />
-                {creating
-                  ? 'Generating Key...'
-                  : `Generate ${selectedComposerMeta.label} Key`}
-              </button>
-
-              {newlyCreatedKey && (
-                <div className="p-3 rounded-2xl bg-[#10A37F]/12 border border-[#10A37F]/35 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-                  <div className="min-w-0">
-                    <div className="text-[11px] font-semibold text-[#10A37F] flex items-center gap-1.5">
-                      <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
-                      <span className="truncate">
-                        Ready: {newlyCreatedKey.name} (
-                        {resolveKeyTrust(newlyCreatedKey).toUpperCase()})
-                      </span>
-                    </div>
-                    <div className="text-[11px] font-mono text-ink truncate mt-0.5">
-                      {newlyCreatedKey.key}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => copyText('new_key', newlyCreatedKey.key)}
-                      className="px-2.5 py-1.5 rounded-xl bg-surface hover:bg-elevated border border-line text-[11px] font-semibold text-ink inline-flex items-center gap-1 transition"
-                    >
-                      {copiedId === 'new_key' ? (
-                        <>
-                          <Check className="w-3 h-3 text-[#10A37F]" /> Copied
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="w-3 h-3" /> Key
-                        </>
-                      )}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        copyText(
-                          'new_mcp',
-                          `${origin}/api/mcp?key=${encodeURIComponent(newlyCreatedKey.key)}`
-                        )
-                      }
-                      className="px-2.5 py-1.5 rounded-xl bg-accent text-accent-fg text-[11px] font-semibold inline-flex items-center gap-1 transition"
-                    >
-                      {copiedId === 'new_mcp' ? (
-                        <>
-                          <Check className="w-3 h-3" /> Copied
-                        </>
-                      ) : (
-                        <>
-                          <Zap className="w-3 h-3" /> MCP URL
-                        </>
-                      )}
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          </form>
-
-          {/* RIGHT CARD: MCP FAST CONNECTION (Zero-Install Instant Connect) */}
-          <div className="lg:col-span-6 rounded-3xl bg-surface border border-line-strong p-4 sm:p-5 shadow-card flex flex-col justify-between gap-4 min-w-0">
-            <div className="space-y-4 min-w-0">
-              <div className="flex items-start justify-between gap-2 flex-wrap">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-9 h-9 rounded-2xl bg-[#10A37F]/15 text-[#10A37F] flex items-center justify-center shrink-0">
-                    <Zap className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <h2 className="text-sm font-semibold text-ink">
-                        MCP Fast Connection
-                      </h2>
-                      <span className="px-2 py-0.5 rounded-full bg-[#10A37F]/15 text-[#10A37F] text-[10px] font-semibold">
-                        Zero Install
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-ink-muted">
-                      Instant remote &amp; local MCP endpoint — no Python or paths needed
-                    </p>
-                  </div>
-                </div>
-
-                {/* Linked Key Selector */}
-                {vault.apiKeys.length > 0 && (
-                  <select
-                    value={selectedKeyObj?.id || ''}
-                    onChange={(e) => setSelectedKeyId(e.target.value)}
-                    title="Active key for MCP Fast Connection"
-                    className="max-w-full sm:max-w-[210px] truncate px-3 py-1.5 rounded-full bg-canvas border border-line text-[11px] text-ink focus:outline-none"
-                  >
-                    {vault.apiKeys.map((k) => {
-                      const tl = resolveKeyTrust(k);
-                      return (
-                        <option key={k.id} value={k.id} className="bg-surface">
-                          {k.name} · {getTrustMeta(tl).label}
-                          {!k.active ? ' (Paused)' : ''}
-                        </option>
-                      );
-                    })}
-                  </select>
-                )}
-              </div>
-
-              {/* Instant MCP Server URL Copy Bar */}
-              <div className="p-3 rounded-2xl bg-canvas border border-line space-y-2 min-w-0">
-                <div className="flex items-center justify-between gap-2 flex-wrap">
-                  <span className="text-[11px] font-medium text-ink-secondary">
-                    Instant MCP Server URL
-                  </span>
-                  <span
-                    className={`px-2 py-0.5 rounded-full border text-[10px] font-semibold ${selectedTrustMeta.badgeClass}`}
-                  >
-                    {selectedTrustMeta.label} Trust · {selectedTrustMeta.toolsCount} MCP Tools
-                  </span>
-                </div>
-
-                <div className="flex items-center gap-2 min-w-0">
-                  <div className="flex-1 min-w-0 px-3 py-2 rounded-xl bg-surface border border-line font-mono text-[11px] text-ink truncate">
-                    {fastMcpUrl}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => copyText('fast_mcp_url', fastMcpUrl)}
-                    className="shrink-0 px-3.5 py-2 rounded-xl bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center gap-1.5 shadow-glow transition"
-                  >
-                    {copiedId === 'fast_mcp_url' ? (
-                      <>
-                        <Check className="w-3.5 h-3.5" /> Copied
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="w-3.5 h-3.5" /> Copy URL
-                      </>
-                    )}
-                  </button>
-                </div>
-              </div>
-
-              {/* 1-Click Fast Launchers + Handshake Test */}
-              <div className="flex flex-wrap items-center gap-2">
-                <a
-                  href={cursorInstallHref}
-                  className="px-3 py-2 rounded-xl bg-elevated hover:bg-accent hover:text-accent-fg border border-line-strong text-xs font-semibold text-ink inline-flex items-center gap-1.5 transition"
-                >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                  1-Click Cursor
-                </a>
-                <a
-                  href={vscodeInstallHref}
-                  className="px-3 py-2 rounded-xl bg-elevated hover:bg-accent hover:text-accent-fg border border-line-strong text-xs font-semibold text-ink inline-flex items-center gap-1.5 transition"
-                >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                  1-Click VS Code
-                </a>
+          <div className="grid grid-cols-2 sm:inline-flex bg-surface border border-line-strong rounded-2xl p-1 text-xs shadow-card shrink-0">
+            {(
+              [
+                { id: 'mcp_keys', label: 'MCP & Keys', icon: Zap },
+                { id: 'scanner', label: 'App Scanner', icon: Radar },
+                {
+                  id: 'chat',
+                  label:
+                    localModels.length > 0
+                      ? `Vault Chat (${localModels.length})`
+                      : 'Vault Chat',
+                  icon: Cpu,
+                },
+                { id: 'rest', label: 'REST & Code', icon: Terminal },
+              ] as const
+            ).map((tab) => {
+              const Icon = tab.icon;
+              const active = studioTab === tab.id;
+              return (
                 <button
+                  key={tab.id}
                   type="button"
-                  disabled={mcpTesting || !selectedKeyObj || isOffline}
-                  onClick={runMcpFastTest}
-                  className="px-3.5 py-2 rounded-xl bg-canvas hover:bg-elevated border border-line-strong text-xs font-semibold text-ink inline-flex items-center gap-1.5 transition disabled:opacity-50 ml-auto"
-                >
-                  <Play
-                    className={`w-3.5 h-3.5 text-[#10A37F] ${
-                      mcpTesting ? 'animate-pulse' : ''
-                    }`}
-                  />
-                  {mcpTesting ? 'Testing MCP...' : 'Test Connection'}
-                </button>
-              </div>
-
-              {/* Live Handshake Output */}
-              {mcpTestResult && (
-                <div
-                  className={`p-3 rounded-2xl border text-xs space-y-2 ${
-                    mcpTestResult.ok
-                      ? 'bg-[#10A37F]/10 border-[#10A37F]/35 text-ink'
-                      : 'bg-red-500/10 border-red-500/35 text-red-300'
+                  onClick={() => setStudioTab(tab.id)}
+                  className={`px-3.5 py-2 sm:py-1.5 rounded-xl font-medium inline-flex items-center justify-center gap-1.5 transition-colors ${
+                    active
+                      ? 'bg-accent text-accent-fg shadow-glow'
+                      : 'text-ink-secondary hover:text-ink'
                   }`}
                 >
-                  {mcpTestResult.ok ? (
-                    <>
-                      <div className="flex items-center justify-between gap-2 flex-wrap">
-                        <span className="font-semibold text-[#10A37F] inline-flex items-center gap-1.5">
-                          <CheckCircle2 className="w-3.5 h-3.5" />
-                          MCP Connected ({mcpTestResult.latencyMs}ms ·{' '}
-                          {mcpTestResult.protocolVersion})
-                        </span>
-                        <span className="text-[11px] text-ink-secondary">
-                          {mcpTestResult.tools?.length || 0} tools unlocked
-                        </span>
-                      </div>
-                      <div className="flex flex-wrap gap-1.5">
-                        {(mcpTestResult.tools || []).map((tName) => (
-                          <span
-                            key={tName}
-                            className="px-2 py-0.5 rounded-md bg-surface/90 border border-line text-[10.5px] font-mono text-ink"
-                          >
-                            {tName}
-                          </span>
-                        ))}
-                      </div>
-                    </>
-                  ) : (
-                    <div>MCP Error: {mcpTestResult.error}</div>
-                  )}
-                </div>
-              )}
-
-              {/* Ready-to-Paste MCP Config Tabs */}
-              <div className="space-y-2 min-w-0">
-                <div className="flex items-center justify-between gap-2 flex-wrap">
-                  <div className="inline-flex bg-canvas border border-line rounded-xl p-0.5 text-[11px] flex-wrap">
-                    {(
-                      [
-                        { id: 'fast_json', label: 'Fast JSON' },
-                        { id: 'claude', label: 'Claude Desktop' },
-                        { id: 'headers', label: 'Headers' },
-                        { id: 'offline_py', label: 'Offline .py' },
-                      ] as const
-                    ).map((t) => (
-                      <button
-                        key={t.id}
-                        type="button"
-                        onClick={() => setMcpFormatTab(t.id)}
-                        className={`px-2.5 py-1 rounded-lg font-medium transition ${
-                          mcpFormatTab === t.id
-                            ? 'bg-accent text-accent-fg'
-                            : 'text-ink-secondary hover:text-ink'
-                        }`}
-                      >
-                        {t.label}
-                      </button>
-                    ))}
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() =>
-                      copyText('mcp_cfg_box', mcpSnippetByTab[mcpFormatTab])
-                    }
-                    className="text-xs text-accent hover:underline font-semibold inline-flex items-center gap-1"
-                  >
-                    {copiedId === 'mcp_cfg_box' ? (
-                      <>
-                        <Check className="w-3.5 h-3.5" /> Copied Config
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="w-3.5 h-3.5" /> Copy JSON
-                      </>
-                    )}
-                  </button>
-                </div>
-
-                <pre className="p-3 rounded-2xl bg-canvas border border-line text-[11px] font-mono text-ink max-w-full overflow-x-auto leading-relaxed max-h-36">
-                  {mcpSnippetByTab[mcpFormatTab]}
-                </pre>
-              </div>
-            </div>
+                  <Icon className="w-3.5 h-3.5 shrink-0" />
+                  <span className="truncate">{tab.label}</span>
+                </button>
+              );
+            })}
           </div>
-        </div>
-
-        {/* LOWER WORKSPACE TABS */}
-        <div className="grid grid-cols-3 sm:inline-flex bg-surface border border-line-strong rounded-2xl sm:rounded-full p-1 text-xs shadow-card w-full sm:w-fit">
-          {[
-            {
-              id: 'keys' as const,
-              label: `Keys & Trust (${vault.apiKeys.length})`,
-              icon: ShieldCheck,
-            },
-            {
-              id: 'apps_chat' as const,
-              label: 'App Scanner & Chat',
-              icon: PlugZap,
-            },
-            {
-              id: 'rest_code' as const,
-              label: 'REST & Snippets',
-              icon: Terminal,
-            },
-          ].map((tab) => {
-            const Icon = tab.icon;
-            const active = sectionTab === tab.id;
-            return (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => setSectionTab(tab.id)}
-                className={`px-3 sm:px-4 py-2 sm:py-1.5 rounded-xl sm:rounded-full font-medium inline-flex items-center justify-center gap-1.5 transition-colors min-w-0 ${
-                  active
-                    ? 'bg-accent text-accent-fg shadow-glow'
-                    : 'text-ink-secondary hover:text-ink'
-                }`}
-              >
-                <Icon className="w-3.5 h-3.5 shrink-0" />
-                <span className="truncate">{tab.label}</span>
-              </button>
-            );
-          })}
         </div>
 
         <AnimatePresence mode="wait">
-          {sectionTab === 'keys' ? (
+          {studioTab === 'mcp_keys' ? (
             <motion.div
-              key="keys"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.14 }}
-              className="space-y-4"
-            >
-              <div className="rounded-3xl bg-surface border border-line divide-y divide-line overflow-hidden shadow-card">
-                {vault.apiKeys.map((k) => {
-                  const revealed = Boolean(revealedIds[k.id]);
-                  const kTrust = resolveKeyTrust(k);
-                  const kMeta = getTrustMeta(kTrust);
-                  const isSelected = selectedKeyObj?.id === k.id;
-                  const folderLabels =
-                    k.allowedFolderIds.length === 0
-                      ? 'All Carpetas'
-                      : k.allowedFolderIds
-                          .map(
-                            (fid) =>
-                              vault.folders.find((fl) => fl.id === fid)?.name ||
-                              fid
-                          )
-                          .join(', ');
-
-                  return (
-                    <div
-                      key={k.id}
-                      className={`px-4 sm:px-5 py-4 flex flex-col lg:flex-row lg:items-center justify-between gap-3.5 transition-colors ${
-                        isSelected ? 'bg-accent-soft/25' : 'hover:bg-elevated/40'
-                      }`}
-                    >
-                      <div className="space-y-1.5 min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <button
-                            type="button"
-                            onClick={() => setSelectedKeyId(k.id)}
-                            className="text-[13.5px] font-semibold text-ink hover:text-accent inline-flex items-center gap-1.5 text-left"
-                          >
-                            <span
-                              className={`w-2 h-2 rounded-full shrink-0 ${
-                                isSelected ? 'bg-accent' : 'bg-line-strong'
-                              }`}
-                            />
-                            {k.name}
-                          </button>
-
-                          <span
-                            className={`text-[10.5px] px-2.5 py-0.5 rounded-full border font-semibold ${kMeta.badgeClass}`}
-                          >
-                            {kMeta.label} Trust
-                          </span>
-
-                          <span
-                            className={`text-[10.5px] px-2.5 py-0.5 rounded-full font-medium ${
-                              k.active
-                                ? 'bg-[#10A37F]/15 text-[#10A37F]'
-                                : 'bg-elevated text-ink-muted'
-                            }`}
-                          >
-                            {k.active ? 'Active' : 'Paused'}
-                          </span>
-
-                          <span className="text-[10.5px] px-2.5 py-0.5 rounded-full bg-elevated text-ink-secondary">
-                            {folderLabels}
-                          </span>
-                        </div>
-
-                        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs font-mono text-ink-muted min-w-0">
-                          <span className="truncate max-w-full">
-                            {revealed ? k.key : k.keyPrefix}
-                          </span>
-                          <span className="text-[11px] font-sans shrink-0">
-                            · {k.usageCount || 0} calls ·{' '}
-                            {formatRelativeTime(k.lastUsedAt)}
-                          </span>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-2 flex-wrap shrink-0">
-                        {/* Inline Live Key Trust Level Switcher */}
-                        <div
-                          className="inline-flex bg-canvas border border-line rounded-xl p-0.5 text-[11px]"
-                          title="Switch Key Trust Level"
-                        >
-                          {TRUST_LEVEL_OPTIONS.map((opt) => {
-                            const active = kTrust === opt.id;
-                            return (
-                              <button
-                                key={opt.id}
-                                type="button"
-                                onClick={() => onUpdateKeyTrustLevel(k, opt.id)}
-                                className={`px-2.5 py-1 rounded-lg font-semibold transition ${
-                                  active
-                                    ? 'bg-accent text-accent-fg shadow-sm'
-                                    : 'text-ink-muted hover:text-ink'
-                                }`}
-                              >
-                                {opt.label}
-                              </button>
-                            );
-                          })}
-                        </div>
-
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setRevealedIds((p) => ({ ...p, [k.id]: !p[k.id] }))
-                          }
-                          className="p-2 rounded-xl bg-elevated hover:bg-canvas text-ink-secondary hover:text-ink transition"
-                          title={revealed ? 'Hide key' : 'Reveal key'}
-                        >
-                          {revealed ? (
-                            <EyeOff className="w-3.5 h-3.5" />
-                          ) : (
-                            <Eye className="w-3.5 h-3.5" />
-                          )}
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => copyText(k.id, k.key)}
-                          className="px-3 py-1.5 rounded-full bg-accent-soft hover:bg-accent text-accent hover:text-accent-fg text-xs font-semibold inline-flex items-center gap-1 transition"
-                        >
-                          {copiedId === k.id ? (
-                            <>
-                              <Check className="w-3.5 h-3.5" /> Key
-                            </>
-                          ) : (
-                            <>
-                              <Copy className="w-3.5 h-3.5" /> Key
-                            </>
-                          )}
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() =>
-                            copyText(
-                              `mcp_${k.id}`,
-                              `${origin}/api/mcp?key=${encodeURIComponent(k.key)}`
-                            )
-                          }
-                          className="px-3 py-1.5 rounded-full bg-elevated hover:bg-accent hover:text-accent-fg border border-line text-xs font-semibold text-ink inline-flex items-center gap-1 transition"
-                        >
-                          {copiedId === `mcp_${k.id}` ? (
-                            <>
-                              <Check className="w-3.5 h-3.5 text-[#10A37F]" /> MCP
-                            </>
-                          ) : (
-                            <>
-                              <Zap className="w-3.5 h-3.5 text-[#10A37F]" /> MCP URL
-                            </>
-                          )}
-                        </button>
-
-                        <button
-                          type="button"
-                          disabled={isOffline}
-                          onClick={() => onToggleKeyActive(k)}
-                          className="px-3 py-1.5 rounded-full bg-elevated hover:bg-canvas text-xs text-ink-secondary hover:text-ink transition disabled:opacity-50"
-                        >
-                          {k.active ? 'Pause' : 'Enable'}
-                        </button>
-
-                        {vault.apiKeys.length > 1 && (
-                          <button
-                            type="button"
-                            disabled={isOffline}
-                            onClick={() => onDeleteKey(k.id)}
-                            className="p-2 rounded-xl text-ink-muted hover:text-red-400 hover:bg-elevated transition disabled:opacity-50"
-                            title="Revoke key"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </motion.div>
-          ) : sectionTab === 'apps_chat' ? (
-            <motion.div
-              key="apps_chat"
+              key="mcp_keys"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               transition={{ duration: 0.14 }}
               className="space-y-6"
             >
-              {/* SCAN FOR AI APPS */}
-              <div className="rounded-3xl bg-surface border border-line-strong p-5 sm:p-6 shadow-card space-y-5">
+              {/* HERO BANNER: MCP FAST CONNECTION */}
+              <div className="studio-card-strong p-4 sm:p-6 space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="w-10 h-10 rounded-xl bg-[#10A37F]/15 border border-[#10A37F]/30 text-[#10A37F] flex items-center justify-center shrink-0">
+                      <Zap className="w-5 h-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h2 className="text-sm sm:text-[15px] font-semibold text-ink">
+                          MCP Fast Connection
+                        </h2>
+                        <span className="px-2 py-0.5 rounded-md bg-[#10A37F]/15 text-[#10A37F] text-[10.5px] font-semibold">
+                          Zero Install · Streamable HTTP
+                        </span>
+                      </div>
+                      <p className="text-xs text-ink-muted mt-0.5">
+                        Paste the URL below or use 1-Click Install — no Python or local path config needed.
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Active Key Selector + Trust Badge */}
+                  {vault.apiKeys.length > 0 && (
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span
+                        className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold ${selectedTrustMeta.badgeClass}`}
+                      >
+                        {selectedTrustMeta.label} · {selectedTrustMeta.toolsCount} tools
+                      </span>
+                      <select
+                        value={selectedKeyObj?.id || ''}
+                        onChange={(e) => setSelectedKeyId(e.target.value)}
+                        title="Active key for MCP Fast Connection"
+                        className="max-w-[190px] truncate px-3 py-1.5 rounded-xl bg-canvas border border-line-strong text-xs text-ink focus:outline-none"
+                      >
+                        {vault.apiKeys.map((k) => (
+                          <option key={k.id} value={k.id} className="bg-surface">
+                            {k.name}
+                            {!k.active ? ' (Paused)' : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
+
+                {/* Sleek Copyable MCP Endpoint Bar */}
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 p-2 rounded-2xl bg-canvas border border-line">
+                  <div className="flex-1 min-w-0 px-3 py-2 font-mono text-xs text-ink truncate select-all">
+                    {fastMcpUrl}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => copyText('fast_mcp_url', fastMcpUrl)}
+                    className="shrink-0 px-4 py-2 rounded-xl bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center justify-center gap-1.5 shadow-glow transition active:scale-[0.98]"
+                  >
+                    {copiedId === 'fast_mcp_url' ? (
+                      <>
+                        <Check className="w-3.5 h-3.5" /> Copied MCP URL
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5" /> Copy MCP URL
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {/* Action Strip: 1-Click Cursor, 1-Click VS Code, Collapsible JSON Configs, Live Handshake Test */}
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <a
+                      href={cursorInstallHref}
+                      className="px-3.5 py-2 rounded-xl bg-elevated hover:bg-accent hover:text-accent-fg border border-line-strong text-xs font-semibold text-ink inline-flex items-center gap-1.5 transition"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      1-Click Cursor
+                    </a>
+                    <a
+                      href={vscodeInstallHref}
+                      className="px-3.5 py-2 rounded-xl bg-elevated hover:bg-accent hover:text-accent-fg border border-line-strong text-xs font-semibold text-ink inline-flex items-center gap-1.5 transition"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      1-Click VS Code
+                    </a>
+                    <button
+                      type="button"
+                      onClick={() => setShowMcpConfigs((v) => !v)}
+                      className="px-3.5 py-2 rounded-xl bg-canvas hover:bg-elevated border border-line text-xs font-medium text-ink-secondary hover:text-ink inline-flex items-center gap-1.5 transition"
+                    >
+                      <Code2 className="w-3.5 h-3.5 text-accent" />
+                      <span>JSON Configs</span>
+                      {showMcpConfigs ? (
+                        <ChevronUp className="w-3.5 h-3.5" />
+                      ) : (
+                        <ChevronDown className="w-3.5 h-3.5" />
+                      )}
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={mcpTesting || !selectedKeyObj || isOffline}
+                    onClick={runMcpFastTest}
+                    className="px-3.5 py-2 rounded-xl bg-canvas hover:bg-elevated border border-line-strong text-xs font-semibold text-ink inline-flex items-center gap-1.5 transition disabled:opacity-50"
+                  >
+                    <Play
+                      className={`w-3.5 h-3.5 text-[#10A37F] ${
+                        mcpTesting ? 'animate-pulse' : ''
+                      }`}
+                    />
+                    {mcpTesting ? 'Testing Handshake...' : 'Test Connection'}
+                  </button>
+                </div>
+
+                {/* Live Handshake Result */}
+                {mcpTestResult && (
+                  <div
+                    className={`p-3.5 rounded-2xl border text-xs space-y-2 ${
+                      mcpTestResult.ok
+                        ? 'bg-[#10A37F]/10 border-[#10A37F]/35 text-ink'
+                        : 'bg-red-500/10 border-red-500/35 text-red-300'
+                    }`}
+                  >
+                    {mcpTestResult.ok ? (
+                      <>
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <span className="font-semibold text-[#10A37F] inline-flex items-center gap-1.5">
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            MCP Handshake Verified ({mcpTestResult.latencyMs}ms ·{' '}
+                            {mcpTestResult.protocolVersion})
+                          </span>
+                          <span className="text-[11px] text-ink-secondary">
+                            {mcpTestResult.tools?.length || 0} tools unlocked for{' '}
+                            {selectedTrustMeta.label} Trust
+                          </span>
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {(mcpTestResult.tools || []).map((tName) => (
+                            <span
+                              key={tName}
+                              className="px-2 py-0.5 rounded-md bg-surface border border-line text-[10.5px] font-mono text-ink"
+                            >
+                              {tName}
+                            </span>
+                          ))}
+                        </div>
+                      </>
+                    ) : (
+                      <div>MCP Error: {mcpTestResult.error}</div>
+                    )}
+                  </div>
+                )}
+
+                {/* Collapsible Ready-to-Paste JSON Configs */}
+                <AnimatePresence>
+                  {showMcpConfigs && (
+                    <motion.div
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: 'auto' }}
+                      exit={{ opacity: 0, height: 0 }}
+                      transition={{ duration: 0.16 }}
+                      className="overflow-hidden"
+                    >
+                      <div className="pt-2 border-t border-line space-y-2.5">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <div className="inline-flex bg-canvas border border-line rounded-xl p-0.5 text-[11px] flex-wrap">
+                            {(
+                              [
+                                { id: 'fast_json', label: 'Fast URL JSON' },
+                                { id: 'claude', label: 'Claude Desktop' },
+                                { id: 'headers', label: 'Bearer Headers' },
+                                { id: 'offline_py', label: 'Offline Python' },
+                              ] as const
+                            ).map((t) => (
+                              <button
+                                key={t.id}
+                                type="button"
+                                onClick={() => setMcpFormatTab(t.id)}
+                                className={`px-2.5 py-1 rounded-lg font-medium transition ${
+                                  mcpFormatTab === t.id
+                                    ? 'bg-accent text-accent-fg'
+                                    : 'text-ink-secondary hover:text-ink'
+                                }`}
+                              >
+                                {t.label}
+                              </button>
+                            ))}
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              copyText(
+                                'mcp_cfg_box',
+                                mcpSnippetByTab[mcpFormatTab]
+                              )
+                            }
+                            className="text-xs text-accent hover:underline font-semibold inline-flex items-center gap-1"
+                          >
+                            {copiedId === 'mcp_cfg_box' ? (
+                              <>
+                                <Check className="w-3.5 h-3.5" /> Copied JSON
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="w-3.5 h-3.5" /> Copy JSON
+                              </>
+                            )}
+                          </button>
+                        </div>
+
+                        <pre className="p-3.5 rounded-2xl bg-canvas border border-line text-[11.5px] font-mono text-ink max-w-full overflow-x-auto leading-relaxed">
+                          {mcpSnippetByTab[mcpFormatTab]}
+                        </pre>
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+
+              {/* BALANCED 12-COLUMN WORKBENCH: GENERATE KEY (5 cols) + SCOPED KEYS LIST (7 cols) */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start min-w-0">
+                {/* LEFT (5 COLS): GENERATE KEY + KEY TRUST LEVEL */}
+                <form
+                  onSubmit={handleGenerateKey}
+                  className="lg:col-span-5 studio-card p-4 sm:p-5 space-y-4 min-w-0"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-8 h-8 rounded-xl bg-accent-soft text-accent flex items-center justify-center shrink-0">
+                        <KeyRound className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-semibold text-ink">
+                          Generate Key
+                        </h3>
+                        <p className="text-[11px] text-ink-muted">
+                          Select Key Trust Level &amp; carpeta access
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2.5">
+                    <input
+                      type="text"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      placeholder="Key name (optional, e.g. Cursor Agent)"
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-canvas border border-line focus:border-accent focus:outline-none text-xs text-ink placeholder:text-ink-muted"
+                    />
+                    <select
+                      value={folderRestriction}
+                      onChange={(e) => setFolderRestriction(e.target.value)}
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-canvas border border-line text-xs text-ink focus:outline-none truncate"
+                    >
+                      <option value="all">Folder Scope: All Carpetas</option>
+                      {vault.folders
+                        .filter((f) => !f.trashed)
+                        .map((f) => (
+                          <option key={f.id} value={f.id}>
+                            Only Carpeta: {f.name}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+
+                  {/* Spacious 3-Row Key Trust Level Picker */}
+                  <div className="space-y-2">
+                    <div className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted">
+                      Key Trust Level
+                    </div>
+
+                    <div className="space-y-2">
+                      {TRUST_LEVEL_OPTIONS.map((opt) => {
+                        const Icon = opt.icon;
+                        const active = trustLevel === opt.id;
+                        return (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            onClick={() => setTrustLevel(opt.id)}
+                            className={`w-full p-3 rounded-xl border text-left transition-all flex items-start gap-3 ${
+                              active
+                                ? `${opt.ringClass} shadow-card`
+                                : 'bg-canvas border-line hover:border-line-strong'
+                            }`}
+                          >
+                            <div
+                              className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0 mt-0.5 bg-surface border border-line"
+                              style={{ color: opt.dotColor }}
+                            >
+                              <Icon className="w-3.5 h-3.5" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-xs font-semibold text-ink">
+                                  {opt.label}{' '}
+                                  <span className="font-normal text-ink-secondary">
+                                    · {opt.subtitle}
+                                  </span>
+                                </span>
+                                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-surface text-ink-muted shrink-0">
+                                  {opt.toolsCount} tools
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-ink-secondary leading-snug mt-0.5">
+                                {opt.summary}
+                              </p>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={creating}
+                    className="w-full py-2.5 px-4 rounded-xl bg-accent hover:bg-accent-hover text-accent-fg font-semibold text-xs inline-flex items-center justify-center gap-2 shadow-glow transition active:scale-[0.99] disabled:opacity-50"
+                  >
+                    <Plus className="w-4 h-4" />
+                    {creating
+                      ? 'Generating Key...'
+                      : `Generate ${selectedComposerMeta.label} Key`}
+                  </button>
+
+                  {newlyCreatedKey && (
+                    <div className="p-3 rounded-xl bg-[#10A37F]/12 border border-[#10A37F]/35 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[11px] font-semibold text-[#10A37F] inline-flex items-center gap-1.5 truncate">
+                          <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                          <span className="truncate">
+                            {newlyCreatedKey.name} (
+                            {resolveKeyTrust(newlyCreatedKey).toUpperCase()})
+                          </span>
+                        </span>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              copyText('new_key', newlyCreatedKey.key)
+                            }
+                            className="px-2 py-1 rounded-lg bg-surface border border-line text-[10.5px] font-semibold text-ink inline-flex items-center gap-1"
+                          >
+                            {copiedId === 'new_key' ? (
+                              <Check className="w-3 h-3 text-[#10A37F]" />
+                            ) : (
+                              <Copy className="w-3 h-3" />
+                            )}
+                            Key
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              copyText(
+                                'new_mcp',
+                                `${origin}/api/mcp?key=${encodeURIComponent(newlyCreatedKey.key)}`
+                              )
+                            }
+                            className="px-2 py-1 rounded-lg bg-accent text-accent-fg text-[10.5px] font-semibold inline-flex items-center gap-1"
+                          >
+                            {copiedId === 'new_mcp' ? (
+                              <Check className="w-3 h-3" />
+                            ) : (
+                              <Zap className="w-3 h-3" />
+                            )}
+                            MCP
+                          </button>
+                        </div>
+                      </div>
+                      <div className="text-[11px] font-mono text-ink truncate">
+                        {newlyCreatedKey.key}
+                      </div>
+                    </div>
+                  )}
+                </form>
+
+                {/* RIGHT (7 COLS): ACTIVE KEYS & INLINE TRUST SWITCHER */}
+                <div className="lg:col-span-7 space-y-3 min-w-0">
+                  <div className="flex items-center justify-between px-0.5">
+                    <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted">
+                      Your AI Keys · {vault.apiKeys.length}
+                    </span>
+                    <span className="text-[11px] text-ink-muted">
+                      Click any key to bind MCP Fast Connection
+                    </span>
+                  </div>
+
+                  <div className="studio-card divide-y divide-line overflow-hidden">
+                    {vault.apiKeys.map((k) => {
+                      const revealed = Boolean(revealedIds[k.id]);
+                      const kTrust = resolveKeyTrust(k);
+                      const kMeta = getTrustMeta(kTrust);
+                      const isSelected = selectedKeyObj?.id === k.id;
+                      const folderLabels =
+                        k.allowedFolderIds.length === 0
+                          ? 'All Carpetas'
+                          : k.allowedFolderIds
+                              .map(
+                                (fid) =>
+                                  vault.folders.find((fl) => fl.id === fid)
+                                    ?.name || fid
+                              )
+                              .join(', ');
+
+                      return (
+                        <div
+                          key={k.id}
+                          onClick={() => setSelectedKeyId(k.id)}
+                          className={`p-4 space-y-3 cursor-pointer transition-colors ${
+                            isSelected
+                              ? 'bg-accent-soft/20'
+                              : 'hover:bg-elevated/40'
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-2.5">
+                            <div className="min-w-0 space-y-1">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span
+                                  className={`w-2 h-2 rounded-full shrink-0 ${
+                                    isSelected ? 'bg-accent' : 'bg-line-strong'
+                                  }`}
+                                />
+                                <span className="text-[13.5px] font-semibold text-ink">
+                                  {k.name}
+                                </span>
+                                <span
+                                  className={`text-[10.5px] px-2 py-0.5 rounded-md border font-semibold ${kMeta.badgeClass}`}
+                                >
+                                  {kMeta.label}
+                                </span>
+                                <span className="text-[10.5px] px-2 py-0.5 rounded-md bg-elevated text-ink-secondary">
+                                  {folderLabels}
+                                </span>
+                                {!k.active && (
+                                  <span className="text-[10.5px] px-2 py-0.5 rounded-md bg-red-500/15 text-red-300">
+                                    Paused
+                                  </span>
+                                )}
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs font-mono text-ink-muted min-w-0">
+                                <span className="truncate max-w-full">
+                                  {revealed ? k.key : k.keyPrefix}
+                                </span>
+                                <span className="text-[11px] font-sans shrink-0">
+                                  · {k.usageCount || 0} calls ·{' '}
+                                  {formatRelativeTime(k.lastUsedAt)}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Clean Bottom Action Strip */}
+                          <div
+                            className="flex items-center justify-between gap-2 flex-wrap pt-1"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            {/* Inline Trust Level Switcher */}
+                            <div className="inline-flex bg-canvas border border-line rounded-xl p-0.5 text-[11px]">
+                              {TRUST_LEVEL_OPTIONS.map((opt) => {
+                                const active = kTrust === opt.id;
+                                return (
+                                  <button
+                                    key={opt.id}
+                                    type="button"
+                                    onClick={() =>
+                                      onUpdateKeyTrustLevel(k, opt.id)
+                                    }
+                                    className={`px-2.5 py-1 rounded-lg font-semibold transition ${
+                                      active
+                                        ? 'bg-accent text-accent-fg shadow-sm'
+                                        : 'text-ink-muted hover:text-ink'
+                                    }`}
+                                  >
+                                    {opt.label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setRevealedIds((p) => ({
+                                    ...p,
+                                    [k.id]: !p[k.id],
+                                  }))
+                                }
+                                className="p-1.5 rounded-lg bg-canvas hover:bg-elevated border border-line text-ink-secondary hover:text-ink transition"
+                                title={revealed ? 'Hide key' : 'Reveal key'}
+                              >
+                                {revealed ? (
+                                  <EyeOff className="w-3.5 h-3.5" />
+                                ) : (
+                                  <Eye className="w-3.5 h-3.5" />
+                                )}
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => copyText(k.id, k.key)}
+                                className="px-2.5 py-1.5 rounded-lg bg-canvas hover:bg-elevated border border-line text-xs font-medium text-ink inline-flex items-center gap-1 transition"
+                              >
+                                {copiedId === k.id ? (
+                                  <Check className="w-3.5 h-3.5 text-[#10A37F]" />
+                                ) : (
+                                  <Copy className="w-3.5 h-3.5" />
+                                )}
+                                Key
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  copyText(
+                                    `mcp_${k.id}`,
+                                    `${origin}/api/mcp?key=${encodeURIComponent(k.key)}`
+                                  )
+                                }
+                                className="px-2.5 py-1.5 rounded-lg bg-accent-soft hover:bg-accent text-accent hover:text-accent-fg text-xs font-semibold inline-flex items-center gap-1 transition"
+                              >
+                                {copiedId === `mcp_${k.id}` ? (
+                                  <Check className="w-3.5 h-3.5" />
+                                ) : (
+                                  <Zap className="w-3.5 h-3.5" />
+                                )}
+                                MCP URL
+                              </button>
+
+                              <button
+                                type="button"
+                                disabled={isOffline}
+                                onClick={() => onToggleKeyActive(k)}
+                                className="px-2.5 py-1.5 rounded-lg bg-canvas hover:bg-elevated border border-line text-xs text-ink-secondary hover:text-ink transition disabled:opacity-50"
+                              >
+                                {k.active ? 'Pause' : 'Enable'}
+                              </button>
+
+                              {vault.apiKeys.length > 1 && (
+                                <button
+                                  type="button"
+                                  disabled={isOffline}
+                                  onClick={() => onDeleteKey(k.id)}
+                                  className="p-1.5 rounded-lg text-ink-muted hover:text-red-400 hover:bg-canvas transition disabled:opacity-50"
+                                  title="Revoke key"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          ) : studioTab === 'scanner' ? (
+            <motion.div
+              key="scanner"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.14 }}
+              className="space-y-6"
+            >
+              {/* AI APP SCANNER */}
+              <div className="studio-card-strong p-5 sm:p-6 space-y-5">
                 <div className="flex flex-col md:flex-row md:items-center justify-between gap-3.5">
                   <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-2xl bg-accent-soft text-accent flex items-center justify-center shrink-0">
+                    <div className="w-10 h-10 rounded-xl bg-accent-soft text-accent flex items-center justify-center shrink-0">
                       <Radar
-                        className={`w-5 h-5 ${scanningApps ? 'animate-spin' : ''}`}
+                        className={`w-5 h-5 ${
+                          scanningApps ? 'animate-spin' : ''
+                        }`}
                       />
                     </div>
                     <div>
@@ -1321,19 +1332,14 @@ curl -s "${origin}/api/v1/ai/folders" -H "Authorization: Bearer ${activeKeyToken
                         <span className="text-sm font-semibold text-ink">
                           Scan for AI Apps
                         </span>
-                        {detectedApps.length > 0 ? (
-                          <span className="px-2.5 py-0.5 rounded-full bg-[#10A37F]/15 text-[#10A37F] text-[11px] font-medium">
-                            {detectedApps.length} AI app
-                            {detectedApps.length === 1 ? '' : 's'} detected
-                          </span>
-                        ) : (
-                          <span className="px-2.5 py-0.5 rounded-full bg-elevated text-ink-muted text-[11px] font-medium">
-                            Ready to scan ports &amp; apps
+                        {detectedApps.length > 0 && (
+                          <span className="px-2 py-0.5 rounded-md bg-[#10A37F]/15 text-[#10A37F] text-[11px] font-medium">
+                            {detectedApps.length} detected
                           </span>
                         )}
                       </div>
                       <p className="text-xs text-ink-muted mt-0.5">
-                        Detects installed/running AI apps and generates pre-linked MCP Fast Connection configs.
+                        Automatically picks the fastest integration method for your installed AI apps.
                       </p>
                     </div>
                   </div>
@@ -1345,10 +1351,12 @@ curl -s "${origin}/api/v1/ai/folders" -H "Authorization: Bearer ${activeKeyToken
                       runAppScan();
                       scanLocalAiModels();
                     }}
-                    className="w-full sm:w-auto px-4 py-2.5 sm:py-2 rounded-full bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center justify-center gap-1.5 shadow-glow transition shrink-0"
+                    className="w-full sm:w-auto px-4 py-2 rounded-xl bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center justify-center gap-1.5 shadow-glow transition shrink-0"
                   >
                     <Radar
-                      className={`w-3.5 h-3.5 ${scanningApps ? 'animate-spin' : ''}`}
+                      className={`w-3.5 h-3.5 ${
+                        scanningApps ? 'animate-spin' : ''
+                      }`}
                     />
                     {scanningApps ? 'Scanning Apps...' : 'Scan for Apps'}
                   </button>
@@ -1358,7 +1366,7 @@ curl -s "${origin}/api/v1/ai/folders" -H "Authorization: Bearer ${activeKeyToken
                 <div className="rounded-2xl bg-canvas border border-line p-3.5 space-y-3">
                   <div className="flex items-center justify-between gap-2 flex-wrap">
                     <span className="text-[11px] font-medium text-ink-secondary">
-                      Tap any AI client for instant pre-linked setup:
+                      Quick-select an AI client for instant pre-linked instructions:
                     </span>
                     <div className="flex items-center gap-1.5 flex-wrap">
                       {POPULAR_APP_PRESETS.map((preset) => (
@@ -1373,7 +1381,7 @@ curl -s "${origin}/api/v1/ai/folders" -H "Authorization: Bearer ${activeKeyToken
                               selectFirst: true,
                             });
                           }}
-                          className="px-2.5 py-1 rounded-full bg-surface hover:bg-elevated border border-line text-[10.5px] text-ink-secondary hover:text-ink transition"
+                          className="px-2.5 py-1 rounded-lg bg-surface hover:bg-elevated border border-line text-[11px] text-ink-secondary hover:text-ink transition"
                         >
                           {preset}
                         </button>
@@ -1440,7 +1448,7 @@ curl -s "${origin}/api/v1/ai/folders" -H "Authorization: Bearer ${activeKeyToken
                               setSelectedAppId(app.id);
                               setAutoConnectBanner(null);
                             }}
-                            className={`px-3.5 py-2 rounded-2xl border text-xs font-medium inline-flex items-center gap-2 transition ${
+                            className={`px-3.5 py-2 rounded-xl border text-xs font-medium inline-flex items-center gap-2 transition ${
                               selected
                                 ? 'bg-accent-soft border-accent text-ink shadow-card'
                                 : 'bg-canvas border-line hover:border-line-strong text-ink-secondary hover:text-ink'
@@ -1460,7 +1468,7 @@ curl -s "${origin}/api/v1/ai/folders" -H "Authorization: Bearer ${activeKeyToken
                             <span className="text-sm font-semibold text-ink">
                               Connect Cloudy → {activeAppGuide.name}
                             </span>
-                            <span className="px-2.5 py-0.5 rounded-full bg-[#10A37F]/15 text-[#10A37F] text-[11px] font-semibold">
+                            <span className="px-2 py-0.5 rounded-md bg-[#10A37F]/15 text-[#10A37F] text-[11px] font-semibold">
                               ✓ {activeAppGuide.bestMethodBadge}
                             </span>
                           </div>
@@ -1477,13 +1485,13 @@ curl -s "${origin}/api/v1/ai/folders" -H "Authorization: Bearer ${activeKeyToken
                         </div>
                       )}
 
-                      <div className="space-y-3">
+                      <div className="space-y-2.5">
                         {activeAppGuide.steps.map((step) => {
                           const action = step.action;
                           return (
                             <div
                               key={step.stepNumber}
-                              className="flex flex-col md:flex-row md:items-center justify-between gap-3 p-3.5 rounded-2xl bg-surface border border-line"
+                              className="flex flex-col md:flex-row md:items-center justify-between gap-3 p-3.5 rounded-xl bg-surface border border-line"
                             >
                               <div className="flex items-start gap-3">
                                 <div className="w-6 h-6 rounded-full bg-accent-soft text-accent text-xs font-semibold flex items-center justify-center shrink-0 mt-0.5">
@@ -1504,7 +1512,7 @@ curl -s "${origin}/api/v1/ai/folders" -H "Authorization: Bearer ${activeKeyToken
                                   {action.type === 'download_zip' && (
                                     <a
                                       href={offlineZipHref}
-                                      className="px-3.5 py-2 rounded-full bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center gap-1.5 shadow-glow transition"
+                                      className="px-3.5 py-2 rounded-xl bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center gap-1.5 shadow-glow transition"
                                     >
                                       <Download className="w-3.5 h-3.5" />
                                       {action.label}
@@ -1513,7 +1521,7 @@ curl -s "${origin}/api/v1/ai/folders" -H "Authorization: Bearer ${activeKeyToken
                                   {action.type === 'download_openwebui' && (
                                     <a
                                       href={openWebUiHref}
-                                      className="px-3.5 py-2 rounded-full bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center gap-1.5 shadow-glow transition"
+                                      className="px-3.5 py-2 rounded-xl bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center gap-1.5 shadow-glow transition"
                                     >
                                       <Download className="w-3.5 h-3.5" />
                                       {action.label}
@@ -1525,7 +1533,7 @@ curl -s "${origin}/api/v1/ai/folders" -H "Authorization: Bearer ${activeKeyToken
                                       onClick={() =>
                                         copyText(action.id, action.value)
                                       }
-                                      className="px-3.5 py-2 rounded-full bg-elevated hover:bg-accent hover:text-accent-fg border border-line-strong text-xs font-semibold text-ink inline-flex items-center gap-1.5 transition"
+                                      className="px-3.5 py-2 rounded-xl bg-elevated hover:bg-accent hover:text-accent-fg border border-line-strong text-xs font-semibold text-ink inline-flex items-center gap-1.5 transition"
                                     >
                                       {copiedId === action.id ? (
                                         <>
@@ -1549,7 +1557,7 @@ curl -s "${origin}/api/v1/ai/folders" -H "Authorization: Bearer ${activeKeyToken
                                       onClick={() =>
                                         handleAutoConnectApp(action.appId)
                                       }
-                                      className="px-4 py-2 rounded-full bg-[#10A37F] hover:opacity-90 text-white text-xs font-semibold inline-flex items-center gap-1.5 shadow-card transition disabled:opacity-50"
+                                      className="px-4 py-2 rounded-xl bg-[#10A37F] hover:opacity-90 text-white text-xs font-semibold inline-flex items-center gap-1.5 shadow-card transition disabled:opacity-50"
                                     >
                                       <Wand2 className="w-3.5 h-3.5" />
                                       {autoConnectingAppId === action.appId
@@ -1566,237 +1574,16 @@ curl -s "${origin}/api/v1/ai/folders" -H "Authorization: Bearer ${activeKeyToken
                     </div>
                   </div>
                 ) : (
-                  <div className="rounded-2xl bg-canvas border border-line p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                    <div className="text-xs text-ink-secondary leading-relaxed">
-                      Tap a preset chip above (like <strong className="text-ink">Cursor</strong> or{' '}
-                      <strong className="text-ink">Claude Desktop</strong>) for instant setup, or download the offline local bridge.
-                    </div>
-                    <a
-                      href={offlineZipHref}
-                      className="px-4 py-2 rounded-full bg-surface hover:bg-elevated border border-line-strong text-xs font-semibold text-ink inline-flex items-center gap-1.5 shrink-0 transition"
-                    >
-                      <Download className="w-3.5 h-3.5 text-accent" />
-                      Offline Bridge (.zip)
-                    </a>
-                  </div>
-                )}
-              </div>
-
-              {/* BUILT-IN VAULT CHAT */}
-              <div className="rounded-3xl bg-surface border border-line p-5 sm:p-6 shadow-card space-y-5">
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-3.5">
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-2xl bg-accent-soft text-accent flex items-center justify-center shrink-0">
-                      <Cpu className="w-5 h-5" />
-                    </div>
-                    <div>
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-sm font-semibold text-ink">
-                          Chat Directly With Your Local AI Models
-                        </span>
-                        {localModels.length > 0 ? (
-                          <span className="px-2.5 py-0.5 rounded-full bg-[#10A37F]/15 text-[#10A37F] text-[11px] font-medium">
-                            {localModels.length} model
-                            {localModels.length === 1 ? '' : 's'} ready
-                            {detectedRuntimes.length > 0
-                              ? ` · ${detectedRuntimes.join(', ')}`
-                              : ''}
-                          </span>
-                        ) : (
-                          <span className="px-2.5 py-0.5 rounded-full bg-elevated text-ink-muted text-[11px] font-medium">
-                            {bridgeRunning
-                              ? 'Bridge Active · Start Ollama or LM Studio'
-                              : 'No local runtime open'}
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-xs text-ink-muted mt-0.5">
-                        Test local models against your Cloudy carpetas &amp; files right here
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <button
-                      type="button"
-                      onClick={() => setShowCustomUrl((v) => !v)}
-                      className="px-3 py-2 rounded-full bg-canvas hover:bg-elevated border border-line text-xs text-ink-secondary hover:text-ink inline-flex items-center gap-1.5 transition"
-                    >
-                      <SlidersHorizontal className="w-3.5 h-3.5" />
-                      Custom Port
-                    </button>
-
-                    <button
-                      type="button"
-                      disabled={scanningModels}
-                      onClick={() => scanLocalAiModels()}
-                      className="px-3.5 py-2 rounded-full bg-elevated hover:bg-canvas border border-line-strong text-xs font-medium text-ink inline-flex items-center gap-1.5 transition"
-                    >
-                      <RefreshCw
-                        className={`w-3.5 h-3.5 ${
-                          scanningModels ? 'animate-spin' : ''
-                        }`}
-                      />
-                      Refresh Models
-                    </button>
-                  </div>
-                </div>
-
-                {showCustomUrl && (
-                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 p-3 rounded-2xl bg-canvas border border-line">
-                    <input
-                      type="text"
-                      value={customUrlInput}
-                      onChange={(e) => setCustomUrlInput(e.target.value)}
-                      placeholder="Custom local OpenAI/Ollama URL (e.g. http://127.0.0.1:5000)"
-                      className="flex-1 px-3.5 py-2 rounded-xl bg-surface border border-line text-xs text-ink placeholder:text-ink-muted focus:outline-none focus:border-accent"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => {
-                        saveCustomLocalAiUrl(customUrlInput);
-                        scanLocalAiModels(customUrlInput);
-                      }}
-                      className="px-4 py-2 rounded-xl bg-elevated hover:bg-accent hover:text-accent-fg text-xs font-medium text-ink transition"
-                    >
-                      Save &amp; Scan
-                    </button>
-                  </div>
-                )}
-
-                {localModels.length > 0 ? (
-                  <div className="space-y-4">
-                    <div className="flex items-center gap-2 px-3.5 py-2 rounded-2xl bg-canvas border border-line">
-                      <span className="text-[11px] text-ink-muted shrink-0">
-                        Active Local Model:
-                      </span>
-                      <select
-                        value={selectedModel?.uid || ''}
-                        onChange={(e) => setSelectedModelUid(e.target.value)}
-                        className="flex-1 bg-transparent text-xs font-medium text-ink focus:outline-none truncate"
-                      >
-                        {localModels.map((m) => (
-                          <option
-                            key={m.uid}
-                            value={m.uid}
-                            className="bg-surface"
-                          >
-                            {m.name} ({m.providerName})
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div className="rounded-2xl bg-canvas border border-line p-4 space-y-3">
-                      {chatHistory.length === 0 ? (
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-[11px] text-ink-muted mr-1">
-                            Try a Vault Skill:
-                          </span>
-                          {[
-                            'Read my files and summarize them',
-                            'What carpetas and notes are in my vault?',
-                          ].map((q) => (
-                            <button
-                              key={q}
-                              type="button"
-                              onClick={() => handleSendChat(q)}
-                              className="px-3 py-1.5 rounded-full bg-surface hover:bg-elevated border border-line text-[11px] text-ink-secondary hover:text-ink transition"
-                            >
-                              {q}
-                            </button>
-                          ))}
-                        </div>
-                      ) : (
-                        <div className="max-h-72 overflow-y-auto space-y-3 pr-1">
-                          {chatHistory.map((turn, idx) => (
-                            <div
-                              key={idx}
-                              className={`flex flex-col ${
-                                turn.role === 'user'
-                                  ? 'items-end'
-                                  : 'items-start'
-                              }`}
-                            >
-                              {turn.skills && turn.skills.length > 0 && (
-                                <div className="flex flex-wrap gap-1.5 mb-1.5">
-                                  {turn.skills.map((s, sIdx) => (
-                                    <span
-                                      key={sIdx}
-                                      className="px-2 py-0.5 rounded-full bg-accent-soft text-accent text-[10px] font-mono"
-                                    >
-                                      ⚡ {s.skill}({s.detail})
-                                    </span>
-                                  ))}
-                                </div>
-                              )}
-                              <div
-                                className={`max-w-[88%] px-3.5 py-2.5 rounded-2xl text-xs whitespace-pre-wrap leading-relaxed ${
-                                  turn.role === 'user'
-                                    ? 'bg-accent text-accent-fg'
-                                    : 'bg-surface border border-line text-ink'
-                                }`}
-                              >
-                                {turn.content}
-                              </div>
-                            </div>
-                          ))}
-                          {chatLoading && (
-                            <div className="text-xs text-ink-muted animate-pulse px-1">
-                              Reading vault files &amp; thinking locally...
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      {chatError && (
-                        <div className="text-xs text-red-400 px-1">
-                          {chatError}
-                        </div>
-                      )}
-
-                      <form
-                        onSubmit={(e) => {
-                          e.preventDefault();
-                          handleSendChat();
-                        }}
-                        className="flex items-center gap-2 pt-1"
-                      >
-                        <input
-                          type="text"
-                          value={chatPrompt}
-                          onChange={(e) => setChatPrompt(e.target.value)}
-                          placeholder={`Ask ${selectedModel?.name || 'Local AI'} about your Cloudy files...`}
-                          className="flex-1 px-4 py-2.5 rounded-full bg-surface border border-line focus:border-accent focus:outline-none text-xs text-ink placeholder:text-ink-muted"
-                        />
-                        <button
-                          type="submit"
-                          disabled={chatLoading || !chatPrompt.trim()}
-                          className="p-2.5 rounded-full bg-accent hover:bg-accent-hover text-accent-fg disabled:opacity-50 transition shadow-glow"
-                        >
-                          <Send className="w-3.5 h-3.5" />
-                        </button>
-                      </form>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="text-xs text-ink-muted">
-                    Start Ollama (
-                    <button
-                      type="button"
-                      onClick={() => copyText('cors', ollamaCorsCmd)}
-                      className="text-accent hover:underline font-mono"
-                    >
-                      {copiedId === 'cors' ? 'Copied!' : ollamaCorsCmd}
-                    </button>
-                    ) or use <strong className="text-ink">MCP Fast Connection</strong> above with any desktop AI client.
+                  <div className="rounded-xl bg-canvas border border-line p-4 text-xs text-ink-secondary">
+                    Tap any client preset chip above (e.g. <strong className="text-ink">Cursor</strong> or{' '}
+                    <strong className="text-ink">Claude Desktop</strong>) for instant pre-linked steps.
                   </div>
                 )}
               </div>
 
               {/* Offline Bridge & OpenWebUI Downloads */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="rounded-3xl bg-surface border border-line p-5 flex flex-col justify-between gap-4 shadow-card">
+                <div className="studio-card p-5 flex flex-col justify-between gap-4">
                   <div className="space-y-2">
                     <div className="w-9 h-9 rounded-xl bg-accent-soft text-accent flex items-center justify-center">
                       <Blocks className="w-4 h-4" />
@@ -1810,14 +1597,14 @@ curl -s "${origin}/api/v1/ai/folders" -H "Authorization: Bearer ${activeKeyToken
                   </div>
                   <a
                     href={offlineZipHref}
-                    className="w-full py-2.5 px-4 rounded-full bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center justify-center gap-1.5 shadow-glow transition"
+                    className="w-full py-2.5 px-4 rounded-xl bg-accent hover:bg-accent-hover text-accent-fg text-xs font-semibold inline-flex items-center justify-center gap-1.5 shadow-glow transition"
                   >
                     <Download className="w-3.5 h-3.5" />
                     Download Plug &amp; Play Pack (.zip)
                   </a>
                 </div>
 
-                <div className="rounded-3xl bg-surface border border-line p-5 flex flex-col justify-between gap-4 shadow-card">
+                <div className="studio-card p-5 flex flex-col justify-between gap-4">
                   <div className="space-y-2">
                     <div className="w-9 h-9 rounded-xl bg-[#10A37F]/15 text-[#10A37F] flex items-center justify-center">
                       <Sparkles className="w-4 h-4" />
@@ -1832,7 +1619,7 @@ curl -s "${origin}/api/v1/ai/folders" -H "Authorization: Bearer ${activeKeyToken
                   </div>
                   <a
                     href={openWebUiHref}
-                    className="w-full py-2.5 px-4 rounded-full bg-elevated hover:bg-accent hover:text-accent-fg border border-line-strong text-ink text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition"
+                    className="w-full py-2.5 px-4 rounded-xl bg-elevated hover:bg-accent hover:text-accent-fg border border-line-strong text-ink text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition"
                   >
                     <Download className="w-3.5 h-3.5" />
                     Download OpenWebUI Skill (.py)
@@ -1840,18 +1627,254 @@ curl -s "${origin}/api/v1/ai/folders" -H "Authorization: Bearer ${activeKeyToken
                 </div>
               </div>
             </motion.div>
+          ) : studioTab === 'chat' ? (
+            <motion.div
+              key="chat"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.14 }}
+              className="studio-card-strong p-5 sm:p-6 space-y-5"
+            >
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-3.5">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-accent-soft text-accent flex items-center justify-center shrink-0">
+                    <Cpu className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-semibold text-ink">
+                        Local AI Vault Chat
+                      </span>
+                      {localModels.length > 0 ? (
+                        <span className="px-2 py-0.5 rounded-md bg-[#10A37F]/15 text-[#10A37F] text-[11px] font-medium">
+                          {localModels.length} model
+                          {localModels.length === 1 ? '' : 's'} ready
+                          {detectedRuntimes.length > 0
+                            ? ` · ${detectedRuntimes.join(', ')}`
+                            : ''}
+                        </span>
+                      ) : (
+                        <span className="px-2 py-0.5 rounded-md bg-elevated text-ink-muted text-[11px] font-medium">
+                          {bridgeRunning
+                            ? 'Bridge Active · Start Ollama or LM Studio'
+                            : 'No local runtime open'}
+                        </span>
+                      )}
+                      {bridgeRunning && (
+                        <span className="px-2 py-0.5 rounded-md bg-canvas border border-line text-[10px] text-ink-secondary">
+                          {bridgeOnlineSync ? 'Auto-Sync Live' : 'Offline Active'}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-ink-muted mt-0.5">
+                      Chat directly with your local Ollama or LM Studio models grounded in your Cloudy vault.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => setShowCustomUrl((v) => !v)}
+                    className="px-3 py-2 rounded-xl bg-canvas hover:bg-elevated border border-line text-xs text-ink-secondary hover:text-ink inline-flex items-center gap-1.5 transition"
+                  >
+                    <SlidersHorizontal className="w-3.5 h-3.5" />
+                    Custom Port
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={scanningModels}
+                    onClick={() => scanLocalAiModels()}
+                    className="px-3.5 py-2 rounded-xl bg-elevated hover:bg-canvas border border-line-strong text-xs font-medium text-ink inline-flex items-center gap-1.5 transition"
+                  >
+                    <RefreshCw
+                      className={`w-3.5 h-3.5 ${
+                        scanningModels ? 'animate-spin' : ''
+                      }`}
+                    />
+                    Refresh Models
+                  </button>
+                </div>
+              </div>
+
+              {showCustomUrl && (
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 p-3 rounded-xl bg-canvas border border-line">
+                  <input
+                    type="text"
+                    value={customUrlInput}
+                    onChange={(e) => setCustomUrlInput(e.target.value)}
+                    placeholder="Custom local OpenAI/Ollama URL (e.g. http://127.0.0.1:5000)"
+                    className="flex-1 px-3.5 py-2 rounded-xl bg-surface border border-line text-xs text-ink placeholder:text-ink-muted focus:outline-none focus:border-accent"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      saveCustomLocalAiUrl(customUrlInput);
+                      scanLocalAiModels(customUrlInput);
+                    }}
+                    className="px-4 py-2 rounded-xl bg-elevated hover:bg-accent hover:text-accent-fg text-xs font-medium text-ink transition"
+                  >
+                    Save &amp; Scan
+                  </button>
+                </div>
+              )}
+
+              {localModels.length > 0 ? (
+                <div className="space-y-4">
+                  <div className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-canvas border border-line">
+                    <span className="text-[11px] text-ink-muted shrink-0">
+                      Active Local Model:
+                    </span>
+                    <select
+                      value={selectedModel?.uid || ''}
+                      onChange={(e) => setSelectedModelUid(e.target.value)}
+                      className="flex-1 bg-transparent text-xs font-medium text-ink focus:outline-none truncate"
+                    >
+                      {localModels.map((m) => (
+                        <option
+                          key={m.uid}
+                          value={m.uid}
+                          className="bg-surface"
+                        >
+                          {m.name} ({m.providerName})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="rounded-2xl bg-canvas border border-line p-4 space-y-3">
+                    {chatHistory.length === 0 ? (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-[11px] text-ink-muted mr-1">
+                          Try a Vault Skill:
+                        </span>
+                        {[
+                          'Read my files and summarize them',
+                          'What carpetas and notes are in my vault?',
+                        ].map((q) => (
+                          <button
+                            key={q}
+                            type="button"
+                            onClick={() => handleSendChat(q)}
+                            className="px-3 py-1.5 rounded-full bg-surface hover:bg-elevated border border-line text-[11px] text-ink-secondary hover:text-ink transition"
+                          >
+                            {q}
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="max-h-80 overflow-y-auto space-y-3 pr-1">
+                        {chatHistory.map((turn, idx) => (
+                          <div
+                            key={idx}
+                            className={`flex flex-col ${
+                              turn.role === 'user'
+                                ? 'items-end'
+                                : 'items-start'
+                            }`}
+                          >
+                            {turn.skills && turn.skills.length > 0 && (
+                              <div className="flex flex-wrap gap-1.5 mb-1.5">
+                                {turn.skills.map((s, sIdx) => (
+                                  <span
+                                    key={sIdx}
+                                    className="px-2 py-0.5 rounded-full bg-accent-soft text-accent text-[10px] font-mono"
+                                  >
+                                    ⚡ {s.skill}({s.detail})
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                            <div
+                              className={`max-w-[88%] px-3.5 py-2.5 rounded-2xl text-xs whitespace-pre-wrap leading-relaxed ${
+                                turn.role === 'user'
+                                  ? 'bg-accent text-accent-fg'
+                                  : 'bg-surface border border-line text-ink'
+                              }`}
+                            >
+                              {turn.content}
+                            </div>
+                          </div>
+                        ))}
+                        {chatLoading && (
+                          <div className="text-xs text-ink-muted animate-pulse px-1">
+                            Reading vault files &amp; thinking locally...
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {chatError && (
+                      <div className="text-xs text-red-400 px-1">
+                        {chatError}
+                      </div>
+                    )}
+
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        handleSendChat();
+                      }}
+                      className="flex items-center gap-2 pt-1"
+                    >
+                      <input
+                        type="text"
+                        value={chatPrompt}
+                        onChange={(e) => setChatPrompt(e.target.value)}
+                        placeholder={`Ask ${selectedModel?.name || 'Local AI'} about your Cloudy files...`}
+                        className="flex-1 px-4 py-2.5 rounded-xl bg-surface border border-line focus:border-accent focus:outline-none text-xs text-ink placeholder:text-ink-muted"
+                      />
+                      <button
+                        type="submit"
+                        disabled={chatLoading || !chatPrompt.trim()}
+                        className="p-2.5 rounded-xl bg-accent hover:bg-accent-hover text-accent-fg disabled:opacity-50 transition shadow-glow"
+                      >
+                        <Send className="w-3.5 h-3.5" />
+                      </button>
+                    </form>
+                  </div>
+                </div>
+              ) : (
+                <div className="p-5 rounded-2xl bg-canvas border border-line text-xs text-ink-secondary space-y-2">
+                  <div className="font-medium text-ink">
+                    No local Ollama or LM Studio runtime responded on localhost yet.
+                  </div>
+                  <div>
+                    Start Ollama with{' '}
+                    <button
+                      type="button"
+                      onClick={() => copyText('cors', ollamaCorsCmd)}
+                      className="text-accent hover:underline font-mono"
+                    >
+                      {copiedId === 'cors' ? 'Copied!' : ollamaCorsCmd}
+                    </button>{' '}
+                    or connect your desktop IDE directly using{' '}
+                    <button
+                      type="button"
+                      onClick={() => setStudioTab('mcp_keys')}
+                      className="text-accent font-semibold hover:underline"
+                    >
+                      MCP Fast Connection
+                    </button>
+                    .
+                  </div>
+                </div>
+              )}
+            </motion.div>
           ) : (
             <motion.div
-              key="rest_code"
+              key="rest"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               transition={{ duration: 0.14 }}
               className="grid grid-cols-1 lg:grid-cols-12 gap-5 min-w-0"
             >
-              <div className="lg:col-span-7 min-w-0 rounded-3xl bg-surface border border-line p-4 sm:p-5 space-y-4 shadow-card">
+              <div className="lg:col-span-7 min-w-0 studio-card p-4 sm:p-5 space-y-4">
                 <div className="flex items-center justify-between gap-2 flex-wrap">
-                  <div className="inline-flex bg-canvas border border-line rounded-full p-1 text-xs">
+                  <div className="inline-flex bg-canvas border border-line rounded-xl p-1 text-xs">
                     {(['ollama', 'curl'] as const).map((tab) => {
                       const active = snippetTab === tab;
                       return (
@@ -1859,7 +1882,7 @@ curl -s "${origin}/api/v1/ai/folders" -H "Authorization: Bearer ${activeKeyToken
                           key={tab}
                           type="button"
                           onClick={() => setSnippetTab(tab)}
-                          className={`px-3.5 py-1.5 rounded-full font-medium transition-colors ${
+                          className={`px-3.5 py-1.5 rounded-lg font-medium transition-colors ${
                             active
                               ? 'bg-accent text-accent-fg shadow-glow'
                               : 'text-ink-secondary hover:text-ink'
@@ -1893,15 +1916,15 @@ curl -s "${origin}/api/v1/ai/folders" -H "Authorization: Bearer ${activeKeyToken
                 </pre>
               </div>
 
-              <div className="lg:col-span-5 min-w-0 rounded-3xl bg-surface border border-line p-4 sm:p-5 space-y-4 shadow-card">
-                <div className="text-xs font-medium text-ink-secondary">
+              <div className="lg:col-span-5 min-w-0 studio-card p-4 sm:p-5 space-y-4">
+                <div className="text-xs font-semibold text-ink">
                   Interactive Endpoint Tester ({selectedTrustMeta.label} Trust)
                 </div>
                 <div className="flex items-center gap-2 min-w-0">
                   <select
                     value={testEndpoint}
                     onChange={(e) => setTestEndpoint(e.target.value)}
-                    className="min-w-0 flex-1 truncate px-3 py-2 rounded-2xl bg-canvas border border-line text-xs font-mono text-ink focus:outline-none"
+                    className="min-w-0 flex-1 truncate px-3 py-2 rounded-xl bg-canvas border border-line text-xs font-mono text-ink focus:outline-none"
                   >
                     <option value="/api/v1/ai/status">GET /api/v1/ai/status</option>
                     <option value="/api/v1/ai/sync-manifest">
@@ -1917,14 +1940,14 @@ curl -s "${origin}/api/v1/ai/folders" -H "Authorization: Bearer ${activeKeyToken
                     type="button"
                     onClick={runLiveTest}
                     disabled={testing || !selectedKeyObj}
-                    className="shrink-0 px-4 py-2 rounded-full bg-accent hover:bg-accent-hover text-accent-fg font-semibold text-xs inline-flex items-center gap-1.5 shadow-glow transition disabled:opacity-50"
+                    className="shrink-0 px-4 py-2 rounded-xl bg-accent hover:bg-accent-hover text-accent-fg font-semibold text-xs inline-flex items-center gap-1.5 shadow-glow transition disabled:opacity-50"
                   >
                     <Play className="w-3.5 h-3.5" />
                     Run
                   </button>
                 </div>
 
-                <pre className="p-3.5 sm:p-4 rounded-2xl bg-canvas border border-line text-[11px] font-mono text-ink-secondary h-52 max-w-full overflow-auto">
+                <pre className="p-3.5 sm:p-4 rounded-2xl bg-canvas border border-line text-[11px] font-mono text-ink-secondary h-56 max-w-full overflow-auto">
                   {testOutput || '// Tap Run to inspect live JSON response'}
                 </pre>
               </div>

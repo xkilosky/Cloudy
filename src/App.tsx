@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   FolderClosed,
   Cloud,
-  KeyRound,
+  Zap,
   Database,
   Smartphone,
   CheckCircle2,
@@ -1545,7 +1545,7 @@ export function App() {
               icon: Cloud,
               badge: vault.accounts.length > 0 ? vault.accounts.length : null,
             },
-            { id: 'ai-keys' as NavTab, label: 'AI & MCP', icon: KeyRound },
+            { id: 'ai-keys' as NavTab, label: 'AI & MCP', icon: Zap },
             { id: 'database' as NavTab, label: 'Database', icon: Database },
             { id: 'android' as NavTab, label: 'Android', icon: Smartphone },
           ].map((item) => {
