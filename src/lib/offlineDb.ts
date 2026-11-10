@@ -30,10 +30,16 @@ export function computeVaultFingerprint(state: VaultState): string {
     )
     .join('|');
   const keyPart = (state.apiKeys || [])
-    .map((k) => `${k.id}:${k.active ? 1 : 0}:${k.usageCount}:${k.lastUsedAt || ''}`)
+    .map((k) => `${k.id}:${k.active ? 1 : 0}:${k.trustLevel || k.scope}:${k.usageCount}:${k.lastUsedAt || ''}`)
+    .join('|');
+  const repoPart = (state.repos || [])
+    .map(
+      (r) =>
+        `${r.id}:${r.name}:${r.branch}:${r.currentVersion}:${r.headCommitHash}:${r.tasks?.length || 0}:${r.updatedAt}`
+    )
     .join('|');
   const logLen = state.aiAuditLog?.length || 0;
-  return `${state.vaultId || ''}#${state.settings?.allocationRule || ''}#${accPart}#${fldPart}#${filPart}#${keyPart}#${logLen}`;
+  return `${state.vaultId || ''}#${state.settings?.allocationRule || ''}#${accPart}#${fldPart}#${filPart}#${keyPart}#${repoPart}#${logLen}`;
 }
 
 export function openVaultDb(): Promise<IDBDatabase> {
@@ -170,6 +176,7 @@ export async function persistSnapshotToOfflineVault(state: VaultState): Promise<
       settings: state.settings,
       summary: state.summary,
       providersCatalog: state.providersCatalog,
+      repos: state.repos || [],
       aiAuditLog: state.aiAuditLog,
       savedAt: new Date().toISOString(),
     });
@@ -215,6 +222,7 @@ export async function loadOfflineSnapshot(): Promise<VaultState | null> {
     settings: VaultState['settings'];
     summary: VaultState['summary'];
     providersCatalog: VaultState['providersCatalog'];
+    repos?: VaultState['repos'];
     aiAuditLog: VaultState['aiAuditLog'];
   }>('meta', 'vault_snapshot_meta');
 
@@ -241,6 +249,7 @@ export async function loadOfflineSnapshot(): Promise<VaultState | null> {
       ...f,
       offlineCached: cachedBlobIds.has(f.id) || Boolean(f.textContent),
     })),
+    repos: meta.repos || [],
     apiKeys,
     aiAuditLog: meta.aiAuditLog || [],
   };

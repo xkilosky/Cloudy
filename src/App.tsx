@@ -2,10 +2,10 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   FolderClosed,
+  GitBranch,
   Cloud,
   Zap,
   Database,
-  Smartphone,
   CheckCircle2,
 } from 'lucide-react';
 import type {
@@ -20,6 +20,7 @@ import type {
 import { Sidebar, type NavTab } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
 import { DriveExplorer } from './components/DriveExplorer';
+import { RepoView } from './components/RepoView';
 import { FilePreviewModal } from './components/FilePreviewModal';
 import { ProvidersHub } from './components/ProvidersHub';
 import { AiApiKeysView } from './components/AiApiKeysView';
@@ -74,6 +75,7 @@ export function App() {
     const params = new URLSearchParams(window.location.search);
     const t = params.get('tab');
     if (
+      t === 'repo' ||
       t === 'providers' ||
       t === 'ai-keys' ||
       t === 'database' ||
@@ -1466,7 +1468,21 @@ export function App() {
           transition={{ duration: 0.12, ease: 'easeOut' }}
           className="flex-1 flex flex-col min-w-0"
         >
-          {activeTab === 'providers' ? (
+          {activeTab === 'repo' ? (
+            <RepoView
+              vault={vault}
+              authUser={authUser}
+              isOffline={isOffline}
+              onRefreshVault={() => refreshVault(false, true, true)}
+              onOpenInFilesExplorer={(folderId) => {
+                setCurrentFolderId(folderId);
+                handleSelectNavTab('files');
+              }}
+              onOpenFilePreview={setPreviewFile}
+              onCreateFolderInVault={handleCreateFolder}
+              onShowToast={showToast}
+            />
+          ) : activeTab === 'providers' ? (
             <ProvidersHub
               vault={vault}
               isOffline={isOffline}
@@ -1540,6 +1556,12 @@ export function App() {
           {[
             { id: 'files' as NavTab, label: 'Files', icon: FolderClosed },
             {
+              id: 'repo' as NavTab,
+              label: 'Repo',
+              icon: GitBranch,
+              badge: (vault.repos || []).length > 0 ? (vault.repos || []).length : null,
+            },
+            {
               id: 'providers' as NavTab,
               label: 'Clouds',
               icon: Cloud,
@@ -1547,7 +1569,6 @@ export function App() {
             },
             { id: 'ai-keys' as NavTab, label: 'AI & MCP', icon: Zap },
             { id: 'database' as NavTab, label: 'Database', icon: Database },
-            { id: 'android' as NavTab, label: 'Android', icon: Smartphone },
           ].map((item) => {
             const Icon = item.icon;
             const active = activeTab === item.id;

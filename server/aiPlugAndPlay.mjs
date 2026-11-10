@@ -1528,6 +1528,55 @@ def call_cloudy(method, path, body=None):
 
 TOOLS = [
     {
+        "name": "list_tools",
+        "description": "Fetches the list of available tools from Cloudy; used at the start of a session to confirm permission to access storage.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "list_wpc",
+        "description": "Lists all available workspaces (wpc) and their current versions in the user's Cloudy storage.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "create_wpc",
+        "description": "Initializes a new project workspace (wpc) in the user's Cloudy storage, creating the physical folder structure in their Cloud Pool.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Workspace / repo name"},
+                "description": {"type": "string", "description": "Optional summary"},
+                "branch": {"type": "string", "description": "Default branch (defaults to main)"},
+                "template": {"type": "string", "description": "typescript, python_ai, web_app, or blank"},
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "commit",
+        "description": "Saves the current state of the sandbox/workspace to Cloudy as a versioned snapshot.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "wpcId": {"type": "string", "description": "Workspace ID, slug, or name"},
+                "message": {"type": "string", "description": "Commit message"},
+                "files": {"type": "array", "description": "Optional list of {path, content} updates"},
+            },
+            "required": ["wpcId", "message"],
+        },
+    },
+    {
+        "name": "checkout",
+        "description": "Restores a previous version of the workspace (wpc) from Cloudy back into the sandbox/vault.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "wpcId": {"type": "string", "description": "Workspace ID, slug, or name"},
+                "target": {"type": "string", "description": "Commit hash, version number, or HEAD"},
+            },
+            "required": ["wpcId"],
+        },
+    },
+    {
         "name": "list_cloudy_folders",
         "description": "List all accessible folders (carpetas) in the user's Cloudy storage vault.",
         "inputSchema": {"type": "object", "properties": {}},
@@ -1597,6 +1646,23 @@ def write_rpc_message(payload):
 
 def handle_tool_call(name, args):
     args = args or {}
+    if name == "list_tools":
+        res = call_cloudy("GET", "/api/v1/ai/tools")
+        return json.dumps(res, indent=2)
+    if name == "list_wpc":
+        res = call_cloudy("GET", "/api/v1/ai/wpc")
+        return json.dumps(res.get("workspaces", []), indent=2)
+    if name == "create_wpc":
+        res = call_cloudy("POST", "/api/v1/ai/wpc", args)
+        return json.dumps(res, indent=2)
+    if name == "commit":
+        wid = urllib.parse.quote(str(args.get("wpcId", "")))
+        res = call_cloudy("POST", f"/api/v1/ai/wpc/{wid}/commit", args)
+        return json.dumps(res, indent=2)
+    if name == "checkout":
+        wid = urllib.parse.quote(str(args.get("wpcId", "")))
+        res = call_cloudy("POST", f"/api/v1/ai/wpc/{wid}/checkout", args)
+        return json.dumps(res, indent=2)
     if name == "list_cloudy_folders":
         res = call_cloudy("GET", "/api/v1/ai/folders")
         return json.dumps(res.get("folders", []), indent=2)

@@ -2,6 +2,7 @@ import React from 'react';
 import { motion } from 'framer-motion';
 import {
   FolderClosed,
+  GitBranch,
   Cloud,
   Zap,
   Database,
@@ -16,7 +17,13 @@ import type { AuthUser, VaultState } from '../types';
 import { formatBytes } from '../lib/format';
 import { STUDIO_THEMES, type StudioTheme } from '../lib/theme';
 
-export type NavTab = 'files' | 'providers' | 'ai-keys' | 'database' | 'android';
+export type NavTab =
+  | 'files'
+  | 'repo'
+  | 'providers'
+  | 'ai-keys'
+  | 'database'
+  | 'android';
 
 interface SidebarProps {
   activeTab: NavTab;
@@ -45,6 +52,12 @@ const NAV_ITEMS: NavItemDef[] = [
     label: 'Files & Carpetas',
     section: 'workspace',
     icon: FolderClosed,
+  },
+  {
+    id: 'repo',
+    label: 'Repo',
+    section: 'workspace',
+    icon: GitBranch,
   },
   {
     id: 'providers',
@@ -90,10 +103,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const usedPct =
     rawQuota > 0 ? Math.min(100, (totalUsed / rawQuota) * 100) : 0;
   const activeFileCount = vault.files.filter((f) => !f.trashed).length;
+  const activeReposCount = (vault.repos || []).length;
   const activeKeysCount = vault.apiKeys.filter((k) => k.active).length;
 
   const getBadgeForTab = (id: NavTab): string | null => {
     if (id === 'files' && activeFileCount > 0) return String(activeFileCount);
+    if (id === 'repo' && activeReposCount > 0) return String(activeReposCount);
     if (id === 'providers') return String(vault.accounts.length);
     if (id === 'ai-keys' && activeKeysCount > 0) return String(activeKeysCount);
     return null;

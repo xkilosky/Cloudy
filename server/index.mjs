@@ -71,6 +71,15 @@ import {
 } from './aiApi.mjs';
 import { createMcpRouter } from './mcpServer.mjs';
 import {
+  createWorkspace,
+  commitWorkspace,
+  checkoutWorkspace,
+  listWorkspaces,
+  findWorkspace,
+  enrichWorkspaceSummary,
+  getDescendantTreeForRoot,
+} from './repoEngine.mjs';
+import {
   getAndroidInfo,
   downloadApkIfBuilt,
   streamAndroidProjectZip,
@@ -549,6 +558,7 @@ app.get('/api/vault/state', (req, res) => {
     accounts: db.accounts.map(sanitizeAccount),
     folders: db.folders,
     files: db.files,
+    repos: listWorkspaces(db),
     apiKeys: (db.apiKeys || []).map((k) => ({
       ...k,
       trustLevel: normalizeTrustLevel(k.trustLevel, k.scope),
@@ -1770,6 +1780,150 @@ app.delete('/api/ai-keys/:id', (req, res) => {
 
 app.get('/api/ai-keys/offline-bundle.zip', streamOfflineAiBundleZip);
 app.get('/api/ai-keys/openwebui-tool.py', downloadOpenWebUiToolHandler);
+
+// --- Cloudy Repo (wpc — GitHub-Style Versioned Cloud Workspaces) ---
+app.get('/api/repos', (req, res) => {
+  const db = loadDb(reqVaultId(req));
+  res.json({
+    ok: true,
+    repos: listWorkspaces(db),
+  });
+});
+
+app.post('/api/repos', async (req, res) => {
+  try {
+    const vaultId = reqVaultId(req);
+    const db = loadDb(vaultId);
+    const authorName =
+      req.authUser?.display_name ||
+      req.authUser?.email?.split('@')[0] ||
+      'X-Kilo';
+
+    const created = await createWorkspace(db, {
+      name: req.body?.name,
+      description: req.body?.description || '',
+      branch: req.body?.branch || 'main',
+      template: req.body?.template || 'typescript',
+      initialFiles: Array.isArray(req.body?.files) ? req.body.files : null,
+      authorName,
+    });
+    await saveDb(vaultId);
+    syncVaultRelationalTables(vaultId, db).catch(() => {});
+    res.status(201).json({
+      ok: true,
+      repo: created.repo,
+      alreadyExisted: created.alreadyExisted,
+    });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message || 'Failed to create repository' });
+  }
+});
+
+app.patch('/api/repos/:id', async (req, res) => {
+  const vaultId = reqVaultId(req);
+  const db = loadDb(vaultId);
+  const repo = findWorkspace(db, req.params.id);
+  if (!repo) {
+    return res.status(404).json({ ok: false, error: 'Repository workspace not found' });
+  }
+
+  const { description, branch, roadmapTitle, tasks } = req.body || {};
+  if (typeof description === 'string') repo.description = description.trim();
+  if (typeof branch === 'string' && branch.trim()) repo.branch = branch.trim();
+  if (typeof roadmapTitle === 'string' && roadmapTitle.trim()) {
+    repo.roadmapTitle = roadmapTitle.trim();
+  }
+  if (Array.isArray(tasks)) {
+    repo.tasks = tasks.map((t) => ({
+      id: String(t.id || makeId('tsk')),
+      title: String(t.title || '').trim(),
+      done: Boolean(t.done),
+    })).filter((t) => t.title);
+  }
+  repo.updatedAt = new Date().toISOString();
+
+  await saveDb(vaultId);
+  syncVaultRelationalTables(vaultId, db).catch(() => {});
+  res.json({ ok: true, repo: enrichWorkspaceSummary(db, repo) });
+});
+
+app.post('/api/repos/:id/commit', async (req, res) => {
+  try {
+    const vaultId = reqVaultId(req);
+    const db = loadDb(vaultId);
+    const authorName =
+      req.authUser?.display_name ||
+      req.authUser?.email?.split('@')[0] ||
+      'X-Kilo';
+
+    const result = await commitWorkspace(db, {
+      wpcId: req.params.id,
+      message: req.body?.message,
+      authorName,
+      files: Array.isArray(req.body?.files) ? req.body.files : null,
+      deletePaths: Array.isArray(req.body?.deletePaths) ? req.body.deletePaths : null,
+    });
+    await saveDb(vaultId);
+    syncVaultRelationalTables(vaultId, db).catch(() => {});
+    res.status(201).json({ ok: true, ...result });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message || 'Commit failed' });
+  }
+});
+
+app.post('/api/repos/:id/checkout', async (req, res) => {
+  try {
+    const vaultId = reqVaultId(req);
+    const db = loadDb(vaultId);
+    const authorName =
+      req.authUser?.display_name ||
+      req.authUser?.email?.split('@')[0] ||
+      'X-Kilo';
+
+    const result = await checkoutWorkspace(db, {
+      wpcId: req.params.id,
+      target: req.body?.target,
+      authorName,
+    });
+    await saveDb(vaultId);
+    syncVaultRelationalTables(vaultId, db).catch(() => {});
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message || 'Checkout failed' });
+  }
+});
+
+app.delete('/api/repos/:id', async (req, res) => {
+  const vaultId = reqVaultId(req);
+  const db = loadDb(vaultId);
+  const repo = findWorkspace(db, req.params.id);
+  if (!repo) {
+    return res.status(404).json({ ok: false, error: 'Repository workspace not found' });
+  }
+
+  const trashFiles = req.query.trashFiles !== 'false';
+  if (trashFiles && repo.rootFolderId) {
+    const { relPathByFolderId } = getDescendantTreeForRoot(db, repo.rootFolderId);
+    const now = new Date().toISOString();
+    for (const fl of db.files) {
+      if (fl.folderId && relPathByFolderId.has(fl.folderId)) {
+        fl.trashed = true;
+        fl.updatedAt = now;
+      }
+    }
+    for (const fd of db.folders) {
+      if (relPathByFolderId.has(fd.id)) {
+        fd.trashed = true;
+        fd.updatedAt = now;
+      }
+    }
+  }
+
+  db.repos = (db.repos || []).filter((r) => r.id !== repo.id);
+  await saveDb(vaultId);
+  syncVaultRelationalTables(vaultId, db, true).catch(() => {});
+  res.json({ ok: true });
+});
 
 // --- Android PWA + APK Download Endpoints ---
 app.get('/api/android/info', getAndroidInfo);

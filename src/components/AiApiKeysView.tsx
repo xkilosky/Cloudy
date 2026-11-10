@@ -99,9 +99,9 @@ const TRUST_LEVEL_OPTIONS: TrustMeta[] = [
     id: 'normal',
     label: 'Normal',
     subtitle: 'Read & Search Only',
-    toolsCount: 4,
+    toolsCount: 6,
     summary:
-      'Lists carpetas & files, searches vault, reads content. Blocks edits & deletes.',
+      'list_tools, list_wpc, list_folders, list_files, search_vault & read_file. Blocks writes.',
     badgeClass: 'bg-sky-500/15 text-sky-400 border-sky-500/30',
     ringClass: 'border-sky-500/60 bg-sky-500/10',
     dotColor: '#38BDF8',
@@ -110,10 +110,10 @@ const TRUST_LEVEL_OPTIONS: TrustMeta[] = [
   {
     id: 'medium',
     label: 'Medium',
-    subtitle: 'Read + Create & Edit',
-    toolsCount: 7,
+    subtitle: 'Read + Repo wpc & Edit',
+    toolsCount: 12,
     summary:
-      'Creates carpetas, saves notes, updates files. Blocks moves & deletion.',
+      'Adds create_wpc, commit, checkout, create_folder, save_note & update_file. Blocks deletion.',
     badgeClass: 'bg-amber-500/15 text-amber-400 border-amber-500/30',
     ringClass: 'border-amber-500/60 bg-amber-500/10',
     dotColor: '#F59E0B',
@@ -123,9 +123,9 @@ const TRUST_LEVEL_OPTIONS: TrustMeta[] = [
     id: 'proved',
     label: 'Proved',
     subtitle: 'Full Trusted Agent',
-    toolsCount: 10,
+    toolsCount: 15,
     summary:
-      'Full access: read, create, edit, move across carpetas, delete & inspect Cloud Pool.',
+      'Full access: all Repo wpc tools + move_file, delete_file & vault_pool_status.',
     badgeClass: 'bg-[#10A37F]/15 text-[#10A37F] border-[#10A37F]/35',
     ringClass: 'border-[#10A37F]/70 bg-[#10A37F]/10',
     dotColor: '#10A37F',
@@ -671,8 +671,11 @@ print(json.loads(urllib.request.urlopen(req).read().decode())["response"])`;
 # OpenAI-Compatible Local Bridge Base URL: http://127.0.0.1:8765/v1
 # API Key: ${activeKeyToken}
 
-# Check key status & trust level
-curl -s "${origin}/api/v1/ai/status" -H "Authorization: Bearer ${activeKeyToken}"
+# Confirm storage permission & list available tools (list_tools)
+curl -s "${origin}/api/v1/ai/tools" -H "Authorization: Bearer ${activeKeyToken}"
+
+# List Repo workspaces & versions (list_wpc)
+curl -s "${origin}/api/v1/ai/wpc" -H "Authorization: Bearer ${activeKeyToken}"
 
 # List accessible carpetas
 curl -s "${origin}/api/v1/ai/folders" -H "Authorization: Bearer ${activeKeyToken}"`;

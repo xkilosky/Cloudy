@@ -26,6 +26,13 @@ import {
   buildTerminalChatPython,
   buildOsLaunchers,
 } from './aiPlugAndPlay.mjs';
+import {
+  createWorkspace,
+  commitWorkspace,
+  checkoutWorkspace,
+  listWorkspaces,
+} from './repoEngine.mjs';
+import { getToolsForTrustLevel } from './mcpServer.mjs';
 
 function getOAuthConfigForProvider(db, providerId) {
   const envClientId = process.env[`${providerId.toUpperCase()}_CLIENT_ID`];
@@ -704,6 +711,131 @@ export function createAiRouter() {
     saveDb(db.vaultId);
     recordAiAudit(db, req.aiKey, 'DELETE', `/api/v1/ai/files/${file.id}`, 200);
     res.json({ ok: true });
+  });
+
+  // GET /api/v1/ai/tools -> list_tools (confirm storage permission & inspect available tools)
+  router.get('/tools', (req, res) => {
+    const db = req.cloudyDb;
+    const tools = getToolsForTrustLevel(req.trustLevel);
+    recordAiAudit(db, req.aiKey, 'GET', '/api/v1/ai/tools', 200);
+    res.json({
+      ok: true,
+      storagePermissionConfirmed: true,
+      vaultId: db.vaultId,
+      keyName: req.aiKey.name,
+      trustLevel: req.trustLevel,
+      scope: req.aiKey.scope,
+      toolsCount: tools.length,
+      tools,
+    });
+  });
+
+  // GET /api/v1/ai/wpc -> list_wpc (list all workspaces & versions)
+  router.get('/wpc', (req, res) => {
+    const db = req.cloudyDb;
+    const { allowedIds } = getAllowedScopeForKey(db, req.aiKey);
+    const allWorkspaces = listWorkspaces(db);
+    const workspaces = allowedIds
+      ? allWorkspaces.filter((w) => w.rootFolderId && allowedIds.has(w.rootFolderId))
+      : allWorkspaces;
+    recordAiAudit(db, req.aiKey, 'GET', '/api/v1/ai/wpc', 200);
+    res.json({
+      ok: true,
+      count: workspaces.length,
+      workspaces,
+    });
+  });
+
+  // POST /api/v1/ai/wpc -> create_wpc (initialize workspace & physical Cloud Pool folders)
+  router.post('/wpc', async (req, res) => {
+    const db = req.cloudyDb;
+    if (req.trustLevel === 'normal' || req.aiKey.scope !== 'read_write') {
+      recordAiAudit(db, req.aiKey, 'POST', '/api/v1/ai/wpc', 403);
+      return res.status(403).json({
+        ok: false,
+        error: 'create_wpc requires Medium or Proved trust level.',
+      });
+    }
+    const { allowedIds } = getAllowedScopeForKey(db, req.aiKey);
+    if (allowedIds) {
+      return res.status(403).json({
+        ok: false,
+        error: 'create_wpc requires an unscoped key.',
+      });
+    }
+    try {
+      const created = await createWorkspace(db, {
+        name: req.body?.name,
+        description: req.body?.description || '',
+        branch: req.body?.branch || 'main',
+        template: req.body?.template || 'typescript',
+        initialFiles: Array.isArray(req.body?.files) ? req.body.files : null,
+        authorName: req.aiKey.name || 'AI API',
+      });
+      await saveDb(db.vaultId);
+      recordAiAudit(db, req.aiKey, 'POST', '/api/v1/ai/wpc', 201);
+      res.status(201).json({
+        ok: true,
+        workspace: created.workspace,
+        repo: created.repo,
+        alreadyExisted: created.alreadyExisted,
+      });
+    } catch (err) {
+      recordAiAudit(db, req.aiKey, 'POST', '/api/v1/ai/wpc', 400);
+      res.status(400).json({ ok: false, error: err.message || 'Failed to create workspace' });
+    }
+  });
+
+  // POST /api/v1/ai/wpc/:wpcId/commit -> commit (save versioned workspace snapshot)
+  router.post('/wpc/:wpcId/commit', async (req, res) => {
+    const db = req.cloudyDb;
+    if (req.trustLevel === 'normal' || req.aiKey.scope !== 'read_write') {
+      recordAiAudit(db, req.aiKey, 'POST', `/api/v1/ai/wpc/${req.params.wpcId}/commit`, 403);
+      return res.status(403).json({
+        ok: false,
+        error: 'commit requires Medium or Proved trust level.',
+      });
+    }
+    try {
+      const result = await commitWorkspace(db, {
+        wpcId: req.params.wpcId,
+        message: req.body?.message,
+        authorName: req.aiKey.name || 'AI API',
+        files: Array.isArray(req.body?.files) ? req.body.files : null,
+        deletePaths: Array.isArray(req.body?.deletePaths) ? req.body.deletePaths : null,
+      });
+      await saveDb(db.vaultId);
+      recordAiAudit(db, req.aiKey, 'POST', `/api/v1/ai/wpc/${req.params.wpcId}/commit`, 201);
+      res.status(201).json({ ok: true, ...result });
+    } catch (err) {
+      recordAiAudit(db, req.aiKey, 'POST', `/api/v1/ai/wpc/${req.params.wpcId}/commit`, 400);
+      res.status(400).json({ ok: false, error: err.message || 'Commit failed' });
+    }
+  });
+
+  // POST /api/v1/ai/wpc/:wpcId/checkout -> checkout (restore previous workspace snapshot)
+  router.post('/wpc/:wpcId/checkout', async (req, res) => {
+    const db = req.cloudyDb;
+    if (req.trustLevel === 'normal' || req.aiKey.scope !== 'read_write') {
+      recordAiAudit(db, req.aiKey, 'POST', `/api/v1/ai/wpc/${req.params.wpcId}/checkout`, 403);
+      return res.status(403).json({
+        ok: false,
+        error: 'checkout requires Medium or Proved trust level.',
+      });
+    }
+    try {
+      const result = await checkoutWorkspace(db, {
+        wpcId: req.params.wpcId,
+        target: req.body?.target,
+        authorName: req.aiKey.name || 'AI API',
+      });
+      await saveDb(db.vaultId);
+      recordAiAudit(db, req.aiKey, 'POST', `/api/v1/ai/wpc/${req.params.wpcId}/checkout`, 200);
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      recordAiAudit(db, req.aiKey, 'POST', `/api/v1/ai/wpc/${req.params.wpcId}/checkout`, 400);
+      res.status(400).json({ ok: false, error: err.message || 'Checkout failed' });
+    }
   });
 
   return router;

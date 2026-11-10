@@ -168,6 +168,7 @@ Free Storage. One System. Your Rules.
     oauthApps: {},
     accounts: [],
     folders: [folderAi, folderDocs],
+    repos: [],
     files: [
       {
         id: 'fil_welcome',
@@ -307,6 +308,7 @@ export async function ensureVaultLoaded(rawVaultId = 'default', { forceFresh = f
     const remoteState = await fetchRemoteVaultState(vaultId);
     hydratedAtMap.set(vaultId, Date.now());
     if (remoteState && Array.isArray(remoteState.accounts)) {
+      if (!Array.isArray(remoteState.repos)) remoteState.repos = [];
       const wasDirty = purgeFakeAccounts(remoteState);
       recalcAccountUsage(remoteState);
       memoryVaults.set(vaultId, remoteState);
@@ -325,6 +327,7 @@ export function loadDb(rawVaultId = 'default') {
   const vaultId = normalizeVaultId(rawVaultId);
   if (memoryVaults.has(vaultId)) {
     const mem = memoryVaults.get(vaultId);
+    if (!Array.isArray(mem.repos)) mem.repos = [];
     if (purgeFakeAccounts(mem)) {
       recalcAccountUsage(mem);
       saveDb(vaultId);
@@ -336,6 +339,7 @@ export function loadDb(rawVaultId = 'default') {
   if (fs.existsSync(vaultPath)) {
     try {
       const parsed = JSON.parse(fs.readFileSync(vaultPath, 'utf8'));
+      if (!Array.isArray(parsed.repos)) parsed.repos = [];
       const wasDirty = purgeFakeAccounts(parsed);
       recalcAccountUsage(parsed);
       memoryVaults.set(vaultId, parsed);

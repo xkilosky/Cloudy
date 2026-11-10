@@ -692,6 +692,23 @@ export async function syncVaultRelationalTables(vaultId, db, forceFullSync = fal
     };
   });
 
+  const repoRows = (db.repos || []).map((r) => ({
+    id: r.id,
+    vault_id: vaultId,
+    user_id: userId,
+    name: r.name || 'Workspace',
+    slug: r.slug || 'workspace',
+    description: r.description || '',
+    branch: r.branch || 'main',
+    root_folder_id: r.rootFolderId || null,
+    current_version: Number(r.currentVersion || 1),
+    head_commit_hash: r.headCommitHash || null,
+    head_commit_message: r.headCommitMessage || null,
+    commits_count: Array.isArray(r.commits) ? r.commits.length : 0,
+    created_at: r.createdAt || now,
+    updated_at: r.updatedAt || now,
+  }));
+
   await Promise.allSettled([
     syncSingleRelationalTable(
       'cloudy_storage_accounts',
@@ -702,6 +719,7 @@ export async function syncVaultRelationalTables(vaultId, db, forceFullSync = fal
     syncSingleRelationalTable('cloudy_folders', vaultId, folderRows, forceFullSync),
     syncSingleRelationalTable('cloudy_files', vaultId, fileRows, forceFullSync),
     syncSingleRelationalTable('cloudy_ai_keys', vaultId, keyRows, forceFullSync),
+    syncSingleRelationalTable('cloudy_repos', vaultId, repoRows, forceFullSync),
   ]);
 }
 
@@ -810,6 +828,20 @@ export async function buildDatabaseOverview({ userRow, currentSessionId, db }) {
     };
   });
 
+  const repoRows = (db.repos || []).map((r) => ({
+    id: r.id,
+    vault_id: vaultId,
+    name: r.name,
+    slug: r.slug,
+    branch: r.branch || 'main',
+    root_folder_id: r.rootFolderId,
+    current_version: r.currentVersion || 1,
+    head_commit_hash: r.headCommitHash || '—',
+    head_commit_message: r.headCommitMessage || '—',
+    commits_count: Array.isArray(r.commits) ? r.commits.length : 0,
+    updated_at: r.updatedAt,
+  }));
+
   const tables = [
     {
       name: 'cloudy_users',
@@ -831,6 +863,13 @@ export async function buildDatabaseOverview({ userRow, currentSessionId, db }) {
       description: 'Verified upstream cloud providers with AES-256-GCM sealed tokens',
       rowCount: accountRows.length,
       rows: accountRows,
+    },
+    {
+      name: 'cloudy_repos',
+      label: 'Repos (wpc)',
+      description: 'Versioned GitHub-style project workspaces backed by your Cloud Pool',
+      rowCount: repoRows.length,
+      rows: repoRows,
     },
     {
       name: 'cloudy_folders',

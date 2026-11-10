@@ -109,6 +109,63 @@ export interface AiAuditEntry {
   timestamp: string;
 }
 
+export interface RepoTask {
+  id: string;
+  title: string;
+  done: boolean;
+}
+
+export interface RepoSnapshotFile {
+  path: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  textContent?: string | null;
+  lastCommitMessage?: string;
+  lastCommitHash?: string;
+  updatedAt: string;
+}
+
+export interface RepoCommit {
+  hash: string;
+  version: number;
+  branch: string;
+  message: string;
+  author: string;
+  createdAt: string;
+  foldersCount: number;
+  filesCount: number;
+  folders?: string[];
+  files?: RepoSnapshotFile[];
+}
+
+export interface RepoWorkspace {
+  id: string;
+  name: string;
+  slug: string;
+  description: string;
+  branch: string;
+  branches: string[];
+  rootFolderId: string;
+  currentVersion: number;
+  headCommitHash: string;
+  headCommitMessage: string;
+  headCommittedAt: string;
+  roadmapTitle: string;
+  tasks: RepoTask[];
+  itemCommitMeta: Record<
+    string,
+    { message: string; hash: string; updatedAt: string }
+  >;
+  commits: RepoCommit[];
+  rootPath?: string;
+  foldersCount?: number;
+  filesCount?: number;
+  totalBytes?: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface VaultState {
   vaultId?: string;
   settings: {
@@ -125,6 +182,7 @@ export interface VaultState {
   accounts: StorageAccount[];
   folders: FolderItem[];
   files: FileItem[];
+  repos?: RepoWorkspace[];
   apiKeys: AiApiKey[];
   aiAuditLog: AiAuditEntry[];
 }

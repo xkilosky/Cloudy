@@ -19,6 +19,12 @@ import {
   sealCredentials,
 } from './cloudAdapters.mjs';
 import { buildFolderPathMap, isLikelyTextMime } from './aiApi.mjs';
+import {
+  createWorkspace,
+  commitWorkspace,
+  checkoutWorkspace,
+  listWorkspaces,
+} from './repoEngine.mjs';
 
 const SUPPORTED_PROTOCOL_VERSIONS = new Set([
   '2025-06-18',
@@ -133,6 +139,24 @@ async function resolveFileText(db, file) {
 export function getToolsForTrustLevel(trustLevel) {
   const normalTools = [
     {
+      name: 'list_tools',
+      description:
+        'Fetches the list of available tools from Cloudy; used at the start of a session to confirm permission to access storage, key trust level, and workspace (wpc) capabilities.',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+      },
+    },
+    {
+      name: 'list_wpc',
+      description:
+        "Lists all available workspaces (wpc) and their current versions, branches, latest commit hashes, and folder/file counts in the user's Cloudy storage.",
+      inputSchema: {
+        type: 'object',
+        properties: {},
+      },
+    },
+    {
       name: 'list_folders',
       description:
         'List accessible carpetas (folders) in the Cloudy vault with full paths and file counts.',
@@ -188,6 +212,103 @@ export function getToolsForTrustLevel(trustLevel) {
   ];
 
   const mediumTools = [
+    {
+      name: 'create_wpc',
+      description:
+        "Initializes a new project workspace (wpc) in the user's Cloudy storage, creating the physical folder structure (/Repos/<name>) in their Cloud Pool.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: {
+            type: 'string',
+            description: 'Repository / workspace name (e.g. "Cloudy-Core" or "ai-agent").',
+          },
+          description: {
+            type: 'string',
+            description: 'Optional summary of the workspace project.',
+          },
+          branch: {
+            type: 'string',
+            description: 'Default branch name (defaults to "main").',
+          },
+          template: {
+            type: 'string',
+            enum: ['typescript', 'python_ai', 'web_app', 'blank'],
+            description:
+              'Starter file structure template ("typescript" default, "python_ai", "web_app", or "blank").',
+          },
+          files: {
+            type: 'array',
+            description: 'Optional extra initial files to seed into the workspace.',
+            items: {
+              type: 'object',
+              properties: {
+                path: { type: 'string', description: 'Relative path inside the repo (e.g. "src/main.ts").' },
+                content: { type: 'string', description: 'UTF-8 file content.' },
+              },
+              required: ['path', 'content'],
+            },
+          },
+        },
+        required: ['name'],
+      },
+    },
+    {
+      name: 'commit',
+      description:
+        'Saves the current state of the sandbox/workspace to Cloudy as a versioned snapshot. Used after a successful build or completed feature; optionally writes or updates sandbox files before snapshotting.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          wpcId: {
+            type: 'string',
+            description: 'Workspace ID (e.g. "wpc_..."), slug, or repository name.',
+          },
+          message: {
+            type: 'string',
+            description: 'Commit summary message describing the changes.',
+          },
+          files: {
+            type: 'array',
+            description: 'Optional sandbox files to create or update before recording the snapshot.',
+            items: {
+              type: 'object',
+              properties: {
+                path: { type: 'string', description: 'Relative path inside the workspace (e.g. "src/app.ts").' },
+                content: { type: 'string', description: 'Updated UTF-8 file content.' },
+              },
+              required: ['path', 'content'],
+            },
+          },
+          deletePaths: {
+            type: 'array',
+            description: 'Optional relative file paths to delete from the workspace prior to snapshot.',
+            items: { type: 'string' },
+          },
+        },
+        required: ['wpcId', 'message'],
+      },
+    },
+    {
+      name: 'checkout',
+      description:
+        'Restores a previous version of the workspace (wpc) from Cloudy back into the sandbox/vault. Used to rollback broken code or undo recent changes.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          wpcId: {
+            type: 'string',
+            description: 'Workspace ID (e.g. "wpc_..."), slug, or repository name.',
+          },
+          target: {
+            type: 'string',
+            description:
+              'Target commit hash (e.g. "8a4f21c"), version number (e.g. "1" or "v1"), or "HEAD" to restore latest committed snapshot.',
+          },
+        },
+        required: ['wpcId'],
+      },
+    },
     {
       name: 'create_folder',
       description:
@@ -345,6 +466,202 @@ async function executeMcpToolCall(db, aiKey, trustLevel, toolName, args = {}) {
         },
       ],
     };
+  }
+
+  if (toolName === 'list_tools') {
+    const toolsList = getToolsForTrustLevel(trustLevel).map((t) => ({
+      name: t.name,
+      description: t.description,
+      required: t.inputSchema?.required || [],
+    }));
+    const payload = {
+      ok: true,
+      storagePermissionConfirmed: true,
+      vaultId: db.vaultId,
+      keyName: aiKey.name,
+      trustLevel,
+      scope: aiKey.scope || (trustLevel === 'normal' ? 'read' : 'read_write'),
+      connectedCloudsCount: (db.accounts || []).length,
+      workspacesCount: (db.repos || []).length,
+      toolsCount: toolsList.length,
+      tools: toolsList,
+    };
+    recordMcpAudit(db, aiKey, 'list_tools', 200);
+    return {
+      content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
+    };
+  }
+
+  if (toolName === 'list_wpc') {
+    const allWorkspaces = listWorkspaces(db);
+    const visibleWorkspaces = allowedIds
+      ? allWorkspaces.filter((w) => w.rootFolderId && allowedIds.has(w.rootFolderId))
+      : allWorkspaces;
+    const summary = visibleWorkspaces.map((w) => ({
+      id: w.id,
+      name: w.name,
+      slug: w.slug,
+      description: w.description,
+      branch: w.branch,
+      rootFolderId: w.rootFolderId,
+      rootPath: w.rootPath,
+      currentVersion: w.currentVersion,
+      headCommitHash: w.headCommitHash,
+      headCommitMessage: w.headCommitMessage,
+      commitsCount: (w.commits || []).length,
+      foldersCount: w.foldersCount,
+      filesCount: w.filesCount,
+      totalBytes: w.totalBytes,
+      updatedAt: w.updatedAt,
+    }));
+    recordMcpAudit(db, aiKey, 'list_wpc', 200);
+    return {
+      content: [{ type: 'text', text: JSON.stringify(summary, null, 2) }],
+    };
+  }
+
+  if (toolName === 'create_wpc') {
+    if (allowedIds) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: 'Creating a new workspace (/Repos/<name>) requires an unscoped key or a key scoped to the /Repos root carpeta.',
+          },
+        ],
+      };
+    }
+    try {
+      const created = await createWorkspace(db, {
+        name: args?.name,
+        description: args?.description || '',
+        branch: args?.branch || 'main',
+        template: args?.template || 'typescript',
+        initialFiles: Array.isArray(args?.files) ? args.files : null,
+        authorName: aiKey.name || 'MCP Agent',
+      });
+      const repo = created.repo;
+      await saveDb(db.vaultId);
+      recordMcpAudit(db, aiKey, 'create_wpc', 201);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                ok: true,
+                alreadyExisted: created.alreadyExisted,
+                wpcId: repo.id,
+                name: repo.name,
+                slug: repo.slug,
+                branch: repo.branch,
+                rootFolderId: repo.rootFolderId,
+                rootPath: repo.rootPath,
+                currentVersion: repo.currentVersion,
+                headCommitHash: repo.headCommitHash,
+                headCommitMessage: repo.headCommitMessage,
+                filesCount: repo.filesCount,
+                foldersCount: repo.foldersCount,
+                totalBytes: repo.totalBytes,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (err) {
+      recordMcpAudit(db, aiKey, 'create_wpc', 400);
+      return {
+        isError: true,
+        content: [{ type: 'text', text: err.message || 'Failed to create workspace.' }],
+      };
+    }
+  }
+
+  if (toolName === 'commit') {
+    try {
+      const result = await commitWorkspace(db, {
+        wpcId: args?.wpcId,
+        message: args?.message,
+        authorName: aiKey.name || 'MCP Agent',
+        files: Array.isArray(args?.files) ? args.files : null,
+        deletePaths: Array.isArray(args?.deletePaths) ? args.deletePaths : null,
+      });
+      await saveDb(db.vaultId);
+      recordMcpAudit(db, aiKey, 'commit', 201);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                ok: true,
+                wpcId: result.repo.id,
+                name: result.repo.name,
+                version: result.commit.version,
+                commitHash: result.commit.hash,
+                message: result.commit.message,
+                filesCount: result.commit.filesCount,
+                foldersCount: result.commit.foldersCount,
+                createdAt: result.commit.createdAt,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (err) {
+      recordMcpAudit(db, aiKey, 'commit', 400);
+      return {
+        isError: true,
+        content: [{ type: 'text', text: err.message || 'Commit failed.' }],
+      };
+    }
+  }
+
+  if (toolName === 'checkout') {
+    try {
+      const result = await checkoutWorkspace(db, {
+        wpcId: args?.wpcId,
+        target: args?.target,
+        authorName: aiKey.name || 'MCP Agent',
+      });
+      await saveDb(db.vaultId);
+      recordMcpAudit(db, aiKey, 'checkout', 200);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                ok: true,
+                wpcId: result.repo.id,
+                name: result.repo.name,
+                restoredVersion: result.restoredCommit.version,
+                restoredCommitHash: result.restoredCommit.hash,
+                restoredMessage: result.restoredCommit.message,
+                filesSnapshot: (result.restoredCommit.files || []).map((s) => ({
+                  path: s.path,
+                  size: s.size,
+                  content: s.textContent,
+                })),
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (err) {
+      recordMcpAudit(db, aiKey, 'checkout', 400);
+      return {
+        isError: true,
+        content: [{ type: 'text', text: err.message || 'Checkout failed.' }],
+      };
+    }
   }
 
   if (toolName === 'list_folders') {

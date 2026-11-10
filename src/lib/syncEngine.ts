@@ -39,6 +39,7 @@ export function sanitizeOfflineSnapshot(snap: VaultState): VaultState {
   return {
     ...snap,
     accounts: realAccounts,
+    repos: Array.isArray(snap.repos) ? snap.repos : [],
     summary: {
       ...snap.summary,
       totalQuotaBytes,

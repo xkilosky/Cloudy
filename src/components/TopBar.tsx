@@ -11,6 +11,7 @@ import {
   Palette,
   Cloud,
   Database,
+  Smartphone,
   SlidersHorizontal,
 } from 'lucide-react';
 import type { AuthUser, VaultState } from '../types';
@@ -40,6 +41,7 @@ interface TopBarProps {
 
 const TAB_TITLES: Record<NavTab, string> = {
   files: 'Files & Carpetas',
+  repo: 'Repo Projects',
   providers: 'Cloud Pool',
   'ai-keys': 'AI & MCP Studio',
   database: 'Database & Auth',
@@ -123,19 +125,22 @@ export const TopBar: React.FC<TopBarProps> = ({
 
   const activeFilesCount = vault.files.filter((f) => !f.trashed).length;
   const activeFoldersCount = vault.folders.filter((f) => !f.trashed).length;
+  const activeReposCount = (vault.repos || []).length;
 
   const desktopSubtitle =
     activeTab === 'files'
       ? `${activeFoldersCount} carpeta${activeFoldersCount === 1 ? '' : 's'} · ${activeFilesCount} file${activeFilesCount === 1 ? '' : 's'}`
-      : activeTab === 'providers'
-        ? `${vault.accounts.length} cloud${vault.accounts.length === 1 ? '' : 's'} · ${rawQuota > 0 ? formatBytes(rawQuota, 0) : '0 GB'} pooled`
-        : activeTab === 'ai-keys'
-          ? `${vault.apiKeys.length} key${vault.apiKeys.length === 1 ? '' : 's'} · Streamable HTTP MCP`
-          : activeTab === 'database'
-            ? authUser
-              ? authUser.email
-              : 'Local Guest Vault'
-            : 'Offline WebAPK & Capacitor';
+      : activeTab === 'repo'
+        ? `${activeReposCount} workspace${activeReposCount === 1 ? '' : 's'} · Cloud Pool wpc`
+        : activeTab === 'providers'
+          ? `${vault.accounts.length} cloud${vault.accounts.length === 1 ? '' : 's'} · ${rawQuota > 0 ? formatBytes(rawQuota, 0) : '0 GB'} pooled`
+          : activeTab === 'ai-keys'
+            ? `${vault.apiKeys.length} key${vault.apiKeys.length === 1 ? '' : 's'} · Streamable HTTP MCP`
+            : activeTab === 'database'
+              ? authUser
+                ? authUser.email
+                : 'Local Guest Vault'
+              : 'Offline WebAPK & Capacitor';
 
   return (
     <header className="sticky top-0 z-30 pt-safe bg-canvas/96 sm:bg-canvas/85 sm:backdrop-blur-xl border-b border-line">
@@ -441,6 +446,22 @@ export const TopBar: React.FC<TopBarProps> = ({
                     })}
                   </div>
                 </div>
+
+                {/* Quick Android App Shortcut (Especially handy on Mobile) */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setQuickMenuOpen(false);
+                    onSelectTab('android');
+                  }}
+                  className="w-full px-3 py-2 rounded-xl bg-canvas/80 hover:bg-elevated border border-line text-xs font-medium text-ink flex items-center justify-between transition-colors"
+                >
+                  <span className="inline-flex items-center gap-2">
+                    <Smartphone className="w-3.5 h-3.5 text-accent" />
+                    <span>Android App & Offline APK</span>
+                  </span>
+                  <span className="text-[11px] text-accent font-medium">Open →</span>
+                </button>
 
                 {/* Quick Actions Footer */}
                 <div className="pt-2 border-t border-line flex items-center justify-between gap-2">
