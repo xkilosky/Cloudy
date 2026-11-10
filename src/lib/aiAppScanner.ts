@@ -95,23 +95,50 @@ export function buildInstructionsForApp(params: {
     origin,
   } = params;
 
-  const mcpJson = JSON.stringify(
-    {
-      mcpServers: {
-        'cloudy-vault': {
-          command: 'python3',
-          args: [mcpScriptPath],
-          env: {
-            CLOUDY_API_KEY: apiKey,
-            CLOUDY_LOCAL_URL: 'http://127.0.0.1:8765',
-            CLOUDY_REMOTE_URL: origin,
+  const fastMcpUrl = `${origin}/api/mcp?key=${encodeURIComponent(apiKey)}`;
+  const mcpJson =
+    bridgeRunning && mcpScriptPath && !mcpScriptPath.startsWith('/path/to/')
+      ? JSON.stringify(
+          {
+            mcpServers: {
+              'cloudy-vault': {
+                command: 'python3',
+                args: [mcpScriptPath],
+                env: {
+                  CLOUDY_API_KEY: apiKey,
+                  CLOUDY_LOCAL_URL: 'http://127.0.0.1:8765',
+                  CLOUDY_REMOTE_URL: origin,
+                },
+              },
+            },
           },
-        },
-      },
-    },
-    null,
-    2
-  );
+          null,
+          2
+        )
+      : id === 'claude_desktop'
+        ? JSON.stringify(
+            {
+              mcpServers: {
+                'cloudy-vault': {
+                  command: 'npx',
+                  args: ['-y', 'mcp-remote', fastMcpUrl],
+                },
+              },
+            },
+            null,
+            2
+          )
+        : JSON.stringify(
+            {
+              mcpServers: {
+                'cloudy-vault': {
+                  url: fastMcpUrl,
+                },
+              },
+            },
+            null,
+            2
+          );
 
   const customSkillPython = `# Drop-in Cloudy Skill for ${name} (Works 100% Offline + Auto-Syncs Online)
 import json, urllib.parse, urllib.request
@@ -184,18 +211,9 @@ def cloudy_skill(path, method="GET", body=None):
 
     const steps: InstructionStep[] = [];
 
-    if (!bridgeRunning) {
-      steps.push({
-        stepNumber: 1,
-        title: 'Download & unzip the Plug & Play Pack once',
-        detail: 'Includes cloudy_mcp_server.py (zero dependencies) + Start-Cloudy-AI for live offline sync.',
-        action: { type: 'download_zip', label: 'Download Plug & Play Pack (.zip)' },
-      });
-    }
-
     if (bridgeRunning && canAutoConfigure) {
       steps.push({
-        stepNumber: steps.length + 1,
+        stepNumber: 1,
         title: `1-Click Auto-Connect ${name}`,
         detail: `Cloudy detected ${name} on your computer${configPath ? ` (${configPath})` : ''}. Click below to inject Cloudy Vault MCP automatically.`,
         action: {
@@ -205,26 +223,32 @@ def cloudy_skill(path, method="GET", body=None):
         },
       });
       steps.push({
-        stepNumber: steps.length + 1,
+        stepNumber: 2,
         title: `Restart ${name}`,
-        detail: `Your AI models in ${name} will immediately see list_cloudy_folders, search_cloudy_files, read_cloudy_file, and write_cloudy_note.`,
+        detail: `Your AI models in ${name} will immediately see your Cloudy Vault MCP tools matching your Key Trust Level.`,
       });
     } else {
       steps.push({
-        stepNumber: steps.length + 1,
-        title: `Paste Cloudy's MCP Config into ${name}`,
-        detail: `${appMenuHint} and paste this pre-linked JSON (update the path to cloudy_mcp_server.py if needed).`,
+        stepNumber: 1,
+        title: `Paste Instant MCP Fast Connection into ${name}`,
+        detail: `${appMenuHint} and paste this zero-install pre-linked MCP config (no Python or file paths needed).`,
         action: {
           type: 'copy',
           id: `mcp_${id}`,
-          label: 'Copy Pre-Filled MCP JSON',
+          label: 'Copy Fast MCP JSON',
           value: mcpJson,
         },
       });
       steps.push({
-        stepNumber: steps.length + 1,
-        title: `Ask any AI model in ${name} to read your files`,
-        detail: 'Works online and 100% offline — automatically syncs whenever internet is available.',
+        stepNumber: 2,
+        title: `Or paste the Direct MCP URL`,
+        detail: `If ${name} accepts a single MCP Server URL, paste this pre-authenticated endpoint directly.`,
+        action: {
+          type: 'copy',
+          id: `mcp_url_${id}`,
+          label: 'Copy MCP Fast URL',
+          value: fastMcpUrl,
+        },
       });
     }
 

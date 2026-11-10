@@ -196,6 +196,7 @@ Free Storage. One System. Your Rules.
         key: defaultKey,
         keyPrefix: `${defaultKey.slice(0, 14)}...${defaultKey.slice(-4)}`,
         scope: 'read_write',
+        trustLevel: 'proved',
         allowedFolderIds: [],
         active: true,
         usageCount: 0,
@@ -694,3 +695,18 @@ export function sanitizeAccount(acc) {
   const { credentials, sealedCredentials, ...safe } = acc;
   return { ...safe, verified: true };
 }
+
+export function normalizeTrustLevel(raw, fallbackScope = 'read') {
+  if (typeof raw === 'string') {
+    const v = raw.trim().toLowerCase();
+    if (v === 'proved' || v === 'full' || v === 'high') return 'proved';
+    if (v === 'medium' || v === 'middium' || v === 'mid') return 'medium';
+    if (v === 'normal' || v === 'low' || v === 'read') return 'normal';
+  }
+  return fallbackScope === 'read_write' ? 'proved' : 'normal';
+}
+
+export function scopeForTrustLevel(trustLevel) {
+  return trustLevel === 'medium' || trustLevel === 'proved' ? 'read_write' : 'read';
+}
+

@@ -34,7 +34,7 @@ interface SidebarProps {
 const NAV_ITEMS: { id: NavTab; label: string; icon: React.ElementType }[] = [
   { id: 'files', label: 'Files & Carpetas', icon: FolderClosed },
   { id: 'providers', label: 'Cloud Pool', icon: Cloud },
-  { id: 'ai-keys', label: 'Local AI API', icon: KeyRound },
+  { id: 'ai-keys', label: 'AI & MCP', icon: KeyRound },
   { id: 'database', label: 'Database & Auth', icon: Database },
   { id: 'android', label: 'Android App', icon: Smartphone },
 ];

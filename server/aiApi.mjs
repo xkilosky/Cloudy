@@ -11,6 +11,7 @@ import {
   writeAccountBinary,
   deleteAccountBinary,
   selectTargetAccount,
+  normalizeTrustLevel,
   makeId,
 } from './store.mjs';
 import {
@@ -167,6 +168,10 @@ export function createAiRouter() {
 
       req.cloudyDb = found.db;
       req.aiKey = found.matched;
+      req.trustLevel = normalizeTrustLevel(
+        found.matched.trustLevel,
+        found.matched.scope
+      );
       next();
     } catch (err) {
       res.status(500).json({ ok: false, error: String(err.message || err) });
@@ -182,8 +187,10 @@ export function createAiRouter() {
       ok: true,
       project: 'Cloudy by X-Kilo',
       mode: 'online-cloud',
+      mcpEndpoint: '/api/mcp',
       autoSyncSupported: true,
       keyName: req.aiKey.name,
+      trustLevel: req.trustLevel,
       scope: req.aiKey.scope,
       restrictedToFolders: Boolean(req.aiKey.allowedFolderIds?.length),
       accessibleFolders: folders.length,
@@ -250,6 +257,7 @@ export function createAiRouter() {
         key: {
           id: req.aiKey.id,
           name: req.aiKey.name,
+          trustLevel: req.trustLevel,
           scope: req.aiKey.scope,
           allowedFolderIds: req.aiKey.allowedFolderIds || [],
         },
@@ -444,15 +452,16 @@ export function createAiRouter() {
     res.send(buf);
   });
 
-  // POST /api/v1/ai/files (Create or idempotent sync of AI output file when scope === 'read_write')
+  // POST /api/v1/ai/files (Create or idempotent sync of AI output file when trustLevel is medium or proved)
   router.post('/files', async (req, res) => {
     try {
       const db = req.cloudyDb;
-      if (req.aiKey.scope !== 'read_write') {
+      if (req.trustLevel === 'normal') {
         recordAiAudit(db, req.aiKey, 'POST', '/api/v1/ai/files', 403);
         return res.status(403).json({
           ok: false,
-          error: 'This API key is read-only. Create a key with read_write scope to allow AI file creation.',
+          error:
+            'This API key has Normal (read-only) trust level. Generate or upgrade to a Medium or Proved key to allow file creation.',
         });
       }
 
@@ -577,11 +586,12 @@ export function createAiRouter() {
   router.patch('/files/:id', async (req, res) => {
     try {
       const db = req.cloudyDb;
-      if (req.aiKey.scope !== 'read_write') {
+      if (req.trustLevel === 'normal') {
         recordAiAudit(db, req.aiKey, 'PATCH', `/api/v1/ai/files/${req.params.id}`, 403);
         return res.status(403).json({
           ok: false,
-          error: 'This API key is read-only. Create a key with read_write scope to update files.',
+          error:
+            'This API key has Normal (read-only) trust level. Generate or upgrade to a Medium or Proved key to update files.',
         });
       }
 
@@ -596,7 +606,14 @@ export function createAiRouter() {
 
       const { name, folderId, tags, content, textContent, base64Content } = req.body || {};
 
-      if (folderId !== undefined) {
+      if (folderId !== undefined && (folderId || null) !== (file.folderId || null)) {
+        if (req.trustLevel !== 'proved') {
+          return res.status(403).json({
+            ok: false,
+            error:
+              'Moving files across carpetas requires Proved trust level.',
+          });
+        }
         if (allowedIds && (!folderId || !allowedIds.has(folderId))) {
           return res.status(403).json({
             ok: false,
@@ -664,14 +681,15 @@ export function createAiRouter() {
     }
   });
 
-  // DELETE /api/v1/ai/files/:id (Delete file when scope === 'read_write')
+  // DELETE /api/v1/ai/files/:id (Delete file — requires Proved trust level)
   router.delete('/files/:id', (req, res) => {
     const db = req.cloudyDb;
-    if (req.aiKey.scope !== 'read_write') {
+    if (req.trustLevel !== 'proved') {
       recordAiAudit(db, req.aiKey, 'DELETE', `/api/v1/ai/files/${req.params.id}`, 403);
       return res.status(403).json({
         ok: false,
-        error: 'This API key is read-only. Create a key with read_write scope to delete files.',
+        error:
+          'Deleting files requires Proved trust level. Upgrade or generate a Proved key to permit deletion.',
       });
     }
 

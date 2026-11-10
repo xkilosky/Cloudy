@@ -135,13 +135,15 @@ function buildOfflineFallbackOverview(
     {
       name: 'cloudy_ai_keys',
       label: 'Scoped AI Keys',
-      description: 'Scoped Local AI & MCP API keys',
+      description: 'Scoped Local AI & MCP Fast Connection API keys with Trust Levels',
       rowCount: vault.apiKeys.length,
       rows: vault.apiKeys.map((k) => ({
         id: k.id,
         vault_id: vid,
         name: k.name,
         key_prefix: k.keyPrefix,
+        trust_level:
+          k.trustLevel || (k.scope === 'read_write' ? 'proved' : 'normal'),
         scope: k.scope,
         usage_count: k.usageCount,
         active: k.active,

@@ -15,6 +15,7 @@ import type {
   FolderItem,
   AllocationRule,
   AiApiKey,
+  AiTrustLevel,
 } from './types';
 import { Sidebar, type NavTab } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
@@ -1186,18 +1187,101 @@ export function App() {
 
   const handleCreateAiKey = async (
     name: string,
-    scope: 'read' | 'read_write',
+    trustLevel: AiTrustLevel,
     allowedFolderIds: string[]
-  ) => {
-    await enqueueServerMutation(async () => {
-      await apiFetch('/api/ai-keys', {
+  ): Promise<AiApiKey | null> => {
+    const scope =
+      trustLevel === 'medium' || trustLevel === 'proved' ? 'read_write' : 'read';
+
+    if (isOffline) {
+      const rand = Array.from(crypto.getRandomValues(new Uint8Array(18)))
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+      const rawKey = `cldy_sk_${rand}`;
+      const label =
+        name.trim() ||
+        `MCP ${trustLevel.charAt(0).toUpperCase() + trustLevel.slice(1)} Key #${(vault?.apiKeys?.length || 0) + 1}`;
+      const offlineKey: AiApiKey = {
+        id: `key_off_${Date.now().toString(36)}`,
+        name: label,
+        key: rawKey,
+        keyPrefix: `${rawKey.slice(0, 14)}...${rawKey.slice(-4)}`,
+        scope,
+        trustLevel,
+        allowedFolderIds,
+        active: true,
+        usageCount: 0,
+        lastUsedAt: null,
+        createdAt: new Date().toISOString(),
+      };
+      setVault((prev) =>
+        prev ? { ...prev, apiKeys: [offlineKey, ...prev.apiKeys] } : prev
+      );
+      await putStoreItem('api_keys', offlineKey);
+      showToast(`Generated ${trustLevel.toUpperCase()} key "${label}"`);
+      return offlineKey;
+    }
+
+    const created = await enqueueServerMutation(async () => {
+      const res = await apiFetch('/api/ai-keys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, scope, allowedFolderIds }),
+        body: JSON.stringify({ name, trustLevel, scope, allowedFolderIds }),
       });
-      await refreshVault(false, true, true);
+      const data = await res.json();
+      if (!data.ok || !data.apiKey) {
+        throw new Error(data.error || 'Failed to generate AI key');
+      }
+      const newKey = data.apiKey as AiApiKey;
+      setVault((prev) =>
+        prev
+          ? {
+              ...prev,
+              apiKeys: [
+                newKey,
+                ...prev.apiKeys.filter((k) => k.id !== newKey.id),
+              ],
+            }
+          : prev
+      );
+      await putStoreItem('api_keys', newKey).catch(() => {});
+      return newKey;
     });
-    showToast(`Created key "${name}"`);
+
+    showToast(
+      `Generated ${trustLevel.toUpperCase()} key "${created.name}"`
+    );
+    return created;
+  };
+
+  const handleUpdateKeyTrustLevel = async (
+    key: AiApiKey,
+    trustLevel: AiTrustLevel
+  ) => {
+    const scope =
+      trustLevel === 'medium' || trustLevel === 'proved' ? 'read_write' : 'read';
+    setVault((prev) =>
+      prev
+        ? {
+            ...prev,
+            apiKeys: prev.apiKeys.map((k) =>
+              k.id === key.id ? { ...k, trustLevel, scope } : k
+            ),
+          }
+        : prev
+    );
+    await putStoreItem('api_keys', { ...key, trustLevel, scope }).catch(() => {});
+
+    if (!isOffline) {
+      await enqueueServerMutation(async () => {
+        await apiFetch(`/api/ai-keys/${key.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ trustLevel, scope }),
+        });
+      });
+    }
+    showToast(`${key.name} set to ${trustLevel.toUpperCase()} trust`);
   };
 
   const handleToggleKeyActive = async (key: AiApiKey) => {
@@ -1400,6 +1484,7 @@ export function App() {
               vault={vault}
               isOffline={isOffline}
               onCreateKey={handleCreateAiKey}
+              onUpdateKeyTrustLevel={handleUpdateKeyTrustLevel}
               onToggleKeyActive={handleToggleKeyActive}
               onDeleteKey={handleDeleteKey}
               onRefreshState={() => refreshVault(false, true, true)}
@@ -1460,7 +1545,7 @@ export function App() {
               icon: Cloud,
               badge: vault.accounts.length > 0 ? vault.accounts.length : null,
             },
-            { id: 'ai-keys' as NavTab, label: 'AI API', icon: KeyRound },
+            { id: 'ai-keys' as NavTab, label: 'AI & MCP', icon: KeyRound },
             { id: 'database' as NavTab, label: 'Database', icon: Database },
             { id: 'android' as NavTab, label: 'Android', icon: Smartphone },
           ].map((item) => {

@@ -662,21 +662,35 @@ export async function syncVaultRelationalTables(vaultId, db, forceFullSync = fal
     updated_at: f.updatedAt || now,
   }));
 
-  const keyRows = (db.apiKeys || []).map((k) => ({
-    id: k.id,
-    vault_id: vaultId,
-    user_id: userId,
-    name: k.name || 'AI API Key',
-    key_hash: sha256Hex(k.key || ''),
-    key_prefix: k.keyPrefix || '',
-    scope: k.scope || 'read_write',
-    allowed_folder_ids: Array.isArray(k.allowedFolderIds) ? k.allowedFolderIds : [],
-    active: k.active !== false,
-    usage_count: Number(k.usageCount || 0),
-    last_used_at: k.lastUsedAt || null,
-    created_at: k.createdAt || now,
-    updated_at: now,
-  }));
+  const keyRows = (db.apiKeys || []).map((k) => {
+    const rawTl = String(k.trustLevel || '').trim().toLowerCase();
+    const trustLevel =
+      rawTl === 'proved'
+        ? 'proved'
+        : rawTl === 'medium' || rawTl === 'middium'
+          ? 'medium'
+          : rawTl === 'normal'
+            ? 'normal'
+            : k.scope === 'read_write'
+              ? 'proved'
+              : 'normal';
+    return {
+      id: k.id,
+      vault_id: vaultId,
+      user_id: userId,
+      name: k.name || 'AI API Key',
+      key_hash: sha256Hex(k.key || ''),
+      key_prefix: k.keyPrefix || '',
+      scope: k.scope || 'read_write',
+      trust_level: trustLevel,
+      allowed_folder_ids: Array.isArray(k.allowedFolderIds) ? k.allowedFolderIds : [],
+      active: k.active !== false,
+      usage_count: Number(k.usageCount || 0),
+      last_used_at: k.lastUsedAt || null,
+      created_at: k.createdAt || now,
+      updated_at: now,
+    };
+  });
 
   await Promise.allSettled([
     syncSingleRelationalTable(
@@ -770,17 +784,31 @@ export async function buildDatabaseOverview({ userRow, currentSessionId, db }) {
     updated_at: f.updatedAt,
   }));
 
-  const keyRows = (db.apiKeys || []).map((k) => ({
-    id: k.id,
-    vault_id: vaultId,
-    name: k.name,
-    key_prefix: k.keyPrefix,
-    key_hash: `sha256:${sha256Hex(k.key || '').slice(0, 16)}…`,
-    scope: k.scope,
-    usage_count: k.usageCount || 0,
-    active: k.active !== false,
-    last_used_at: k.lastUsedAt,
-  }));
+  const keyRows = (db.apiKeys || []).map((k) => {
+    const rawTl = String(k.trustLevel || '').trim().toLowerCase();
+    const trustLevel =
+      rawTl === 'proved'
+        ? 'proved'
+        : rawTl === 'medium' || rawTl === 'middium'
+          ? 'medium'
+          : rawTl === 'normal'
+            ? 'normal'
+            : k.scope === 'read_write'
+              ? 'proved'
+              : 'normal';
+    return {
+      id: k.id,
+      vault_id: vaultId,
+      name: k.name,
+      key_prefix: k.keyPrefix,
+      key_hash: `sha256:${sha256Hex(k.key || '').slice(0, 16)}…`,
+      trust_level: trustLevel,
+      scope: k.scope,
+      usage_count: k.usageCount || 0,
+      active: k.active !== false,
+      last_used_at: k.lastUsedAt,
+    };
+  });
 
   const tables = [
     {

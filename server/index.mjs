@@ -19,6 +19,8 @@ import {
   sanitizeAccount,
   generateApiKeyString,
   normalizeVaultId,
+  normalizeTrustLevel,
+  scopeForTrustLevel,
   makeId,
 } from './store.mjs';
 import {
@@ -67,6 +69,7 @@ import {
   streamOfflineAiBundleZip,
   downloadOpenWebUiToolHandler,
 } from './aiApi.mjs';
+import { createMcpRouter } from './mcpServer.mjs';
 import {
   getAndroidInfo,
   downloadApkIfBuilt,
@@ -103,7 +106,7 @@ app.use('/api', async (req, res, next) => {
   };
 
   // Scoped AI API (/api/v1/ai/*), OAuth callback, and Android static info handle their own auth/state
-  if (req.path.startsWith('/v1/ai')) {
+  if (req.path.startsWith('/v1/ai') || req.path.startsWith('/mcp')) {
     return next();
   }
 
@@ -516,6 +519,10 @@ async function importRemoteFilesIntoVault(db, account, { propagateAuthError = fa
   }
 }
 
+// Mount Zero-Install Remote MCP Fast Connection Server (/api/mcp & /api/v1/ai/mcp)
+app.use('/api/mcp', createMcpRouter());
+app.use('/api/v1/ai/mcp', createMcpRouter());
+
 // Mount Local Offline AI REST API v1 (/api/v1/ai/*)
 app.use('/api/v1/ai', createAiRouter());
 
@@ -542,7 +549,10 @@ app.get('/api/vault/state', (req, res) => {
     accounts: db.accounts.map(sanitizeAccount),
     folders: db.folders,
     files: db.files,
-    apiKeys: db.apiKeys,
+    apiKeys: (db.apiKeys || []).map((k) => ({
+      ...k,
+      trustLevel: normalizeTrustLevel(k.trustLevel, k.scope),
+    })),
     aiAuditLog: db.aiAuditLog || [],
   });
 });
@@ -1696,20 +1706,29 @@ app.delete('/api/files/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-// --- Cloudy Local Offline AI API Keys ---
+// --- Cloudy Local Offline AI & MCP Fast Connection API Keys ---
 app.post('/api/ai-keys', (req, res) => {
   const db = loadDb(reqVaultId(req));
-  const { name, scope = 'read', allowedFolderIds = [] } = req.body || {};
-  if (!name || !String(name).trim()) {
-    return res.status(400).json({ ok: false, error: 'Key name is required' });
-  }
+  const { name, scope, trustLevel, allowedFolderIds = [] } = req.body || {};
+
+  const resolvedTrust = normalizeTrustLevel(
+    trustLevel,
+    scope === 'read_write' ? 'proved' : 'normal'
+  );
+  const resolvedScope = scopeForTrustLevel(resolvedTrust);
+  const label =
+    name && String(name).trim()
+      ? String(name).trim()
+      : `MCP ${resolvedTrust.charAt(0).toUpperCase() + resolvedTrust.slice(1)} Key #${(db.apiKeys?.length || 0) + 1}`;
+
   const rawKey = generateApiKeyString();
   const record = {
     id: makeId('key'),
-    name: String(name).trim(),
+    name: label,
     key: rawKey,
     keyPrefix: `${rawKey.slice(0, 14)}...${rawKey.slice(-4)}`,
-    scope: scope === 'read_write' ? 'read_write' : 'read',
+    scope: resolvedScope,
+    trustLevel: resolvedTrust,
     allowedFolderIds: Array.isArray(allowedFolderIds) ? allowedFolderIds : [],
     active: true,
     usageCount: 0,
@@ -1726,9 +1745,16 @@ app.patch('/api/ai-keys/:id', (req, res) => {
   const record = db.apiKeys.find((k) => k.id === req.params.id);
   if (!record) return res.status(404).json({ ok: false, error: 'API key not found' });
 
-  const { active, scope, allowedFolderIds, name } = req.body || {};
+  const { active, scope, trustLevel, allowedFolderIds, name } = req.body || {};
   if (typeof active === 'boolean') record.active = active;
-  if (scope === 'read' || scope === 'read_write') record.scope = scope;
+  if (trustLevel !== undefined) {
+    const resolvedTrust = normalizeTrustLevel(trustLevel, record.scope);
+    record.trustLevel = resolvedTrust;
+    record.scope = scopeForTrustLevel(resolvedTrust);
+  } else if (scope === 'read' || scope === 'read_write') {
+    record.scope = scope;
+    record.trustLevel = normalizeTrustLevel(undefined, scope);
+  }
   if (Array.isArray(allowedFolderIds)) record.allowedFolderIds = allowedFolderIds;
   if (typeof name === 'string' && name.trim()) record.name = name.trim();
   saveDb(db.vaultId);

@@ -83,12 +83,15 @@ export interface FileItem {
   updatedAt: string;
 }
 
+export type AiTrustLevel = 'normal' | 'medium' | 'proved';
+
 export interface AiApiKey {
   id: string;
   name: string;
   key: string;
   keyPrefix: string;
   scope: 'read' | 'read_write';
+  trustLevel?: AiTrustLevel;
   allowedFolderIds: string[];
   active: boolean;
   usageCount: number;
