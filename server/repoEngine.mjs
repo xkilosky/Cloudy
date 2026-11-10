@@ -87,13 +87,20 @@ function normalizeRelPath(rawPath = '') {
     .join('/');
 }
 
-export function buildStarterTemplate(name, description = '', template = 'blank') {
+export function buildStarterTemplate(
+  name,
+  description = '',
+  template = 'blank',
+  customReadme = ''
+) {
   const title = String(name || 'Workspace').trim();
   const desc =
     String(description || '').trim() ||
     `${title} — versioned Cloudy workspace backed by your Cloud Pool.`;
 
-  const baseReadme = `# ${title}\n\n## Getting Started\n\n${desc}\n\n### Cloudy Workspace Commands (MCP)\n- \`list_wpc\` — Inspect workspace status & current version\n- \`commit\` — Save a versioned snapshot to Cloudy\n- \`checkout\` — Roll back or restore any snapshot version\n`;
+  const baseReadme =
+    String(customReadme || '').trim() ||
+    `# ${title}\n\n## Getting Started\n\n${desc}\n\n### Cloudy Workspace Commands (MCP)\n- \`list_wpc\` — Inspect workspace status & current version\n- \`commit\` — Save a versioned snapshot to Cloudy\n- \`checkout\` — Roll back or restore any snapshot version\n`;
 
   if (template === 'typescript') {
     return {
@@ -524,7 +531,8 @@ export async function createWorkspace(db, params = {}) {
   const branch = String(params.branch || 'main').trim() || 'main';
   const author = String(params.author || params.authorName || 'Cloudy User').trim();
   const description = String(params.description || '').trim();
-  const templateId = String(params.template || 'typescript').trim();
+  const customReadme = typeof params.readme === 'string' ? params.readme.trim() : '';
+  const templateId = String(params.template || 'blank').trim();
 
   // Create physical /Repos/<name> folder structure in the user's Cloud Pool vault
   const reposParent = ensureReposParentFolder(db);
@@ -540,7 +548,7 @@ export async function createWorkspace(db, params = {}) {
   };
   db.folders.unshift(rootFolder);
 
-  const tpl = buildStarterTemplate(rawName, description, templateId);
+  const tpl = buildStarterTemplate(rawName, description, templateId, customReadme);
   const foldersToCreate = Array.isArray(params.folders)
     ? params.folders
     : tpl.folders;
@@ -549,10 +557,16 @@ export async function createWorkspace(db, params = {}) {
     : Array.isArray(params.initialFiles)
       ? params.initialFiles
       : null;
-  const filesToCreate =
-    customSeedFiles && customSeedFiles.length > 0
-      ? [...tpl.files, ...customSeedFiles]
-      : tpl.files;
+  const mergedFilesMap = new Map();
+  for (const f of tpl.files) {
+    mergedFilesMap.set(normalizeRelPath(f.path || f.name || '').toLowerCase(), f);
+  }
+  if (customSeedFiles && customSeedFiles.length > 0) {
+    for (const f of customSeedFiles) {
+      mergedFilesMap.set(normalizeRelPath(f.path || f.name || '').toLowerCase(), f);
+    }
+  }
+  const filesToCreate = Array.from(mergedFilesMap.values());
 
   const initHash = makeCommitHash(rawName);
   const initMessage = String(params.commitMessage || 'init: initial setup').trim();

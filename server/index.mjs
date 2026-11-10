@@ -1802,6 +1802,7 @@ app.post('/api/repos', async (req, res) => {
     const created = await createWorkspace(db, {
       name: req.body?.name,
       description: req.body?.description || '',
+      readme: req.body?.readme || '',
       branch: req.body?.branch || 'main',
       template: req.body?.template || 'typescript',
       initialFiles: Array.isArray(req.body?.files) ? req.body.files : null,

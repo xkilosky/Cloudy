@@ -215,17 +215,22 @@ export function getToolsForTrustLevel(trustLevel) {
     {
       name: 'create_wpc',
       description:
-        "Initializes a new project workspace (wpc) in the user's Cloudy storage, creating the physical folder structure (/Repos/<name>) in their Cloud Pool.",
+        "Initializes a new project workspace (wpc) in the user's Cloudy storage, creating the physical folder structure (/Repos/<name>) in their Cloud Pool. Requires Repo name, Repo description, and Repo README.md content.",
       inputSchema: {
         type: 'object',
         properties: {
           name: {
             type: 'string',
-            description: 'Repository / workspace name (e.g. "Cloudy-Core" or "ai-agent").',
+            description: 'Repo name? (e.g. "Cloudy-Core" or "ai-agent").',
           },
           description: {
             type: 'string',
-            description: 'Optional summary of the workspace project.',
+            description: 'Repo description? Short summary of what this repository project does.',
+          },
+          readme: {
+            type: 'string',
+            description:
+              'Repo README? Full Markdown content to write into the root README.md of this repository.',
           },
           branch: {
             type: 'string',
@@ -233,9 +238,9 @@ export function getToolsForTrustLevel(trustLevel) {
           },
           template: {
             type: 'string',
-            enum: ['typescript', 'python_ai', 'web_app', 'blank'],
+            enum: ['blank', 'typescript', 'python_ai', 'web_app'],
             description:
-              'Starter file structure template ("typescript" default, "python_ai", "web_app", or "blank").',
+              'Optional starter scaffold ("blank" default, "typescript", "python_ai", or "web_app").',
           },
           files: {
             type: 'array',
@@ -250,7 +255,7 @@ export function getToolsForTrustLevel(trustLevel) {
             },
           },
         },
-        required: ['name'],
+        required: ['name', 'description', 'readme'],
       },
     },
     {
@@ -532,12 +537,49 @@ async function executeMcpToolCall(db, aiKey, trustLevel, toolName, args = {}) {
         ],
       };
     }
+    const rawName = String(args?.name || '').trim();
+    const rawDesc = String(args?.description || '').trim();
+    const rawReadme = String(args?.readme || '').trim();
+    const missingPrompts = [];
+    if (!rawName) missingPrompts.push({ field: 'name', question: 'Repo name?' });
+    if (!rawDesc) {
+      missingPrompts.push({ field: 'description', question: 'Repo description?' });
+    }
+    if (!rawReadme) {
+      missingPrompts.push({
+        field: 'readme',
+        question: 'Repo README? (Markdown content for README.md)',
+      });
+    }
+    if (missingPrompts.length > 0) {
+      recordMcpAudit(db, aiKey, 'create_wpc:prompt_required_fields', 200);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                ok: false,
+                needsInput: true,
+                message:
+                  'To initialize this Cloudy Repo workspace, please answer the following and call create_wpc again:',
+                questions: missingPrompts,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+
     try {
       const created = await createWorkspace(db, {
-        name: args?.name,
-        description: args?.description || '',
+        name: rawName,
+        description: rawDesc,
+        readme: rawReadme,
         branch: args?.branch || 'main',
-        template: args?.template || 'typescript',
+        template: args?.template || 'blank',
         initialFiles: Array.isArray(args?.files) ? args.files : null,
         authorName: aiKey.name || 'MCP Agent',
       });

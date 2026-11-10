@@ -763,12 +763,38 @@ export function createAiRouter() {
         error: 'create_wpc requires an unscoped key.',
       });
     }
+    const rawName = String(req.body?.name || '').trim();
+    const rawDesc = String(req.body?.description || '').trim();
+    const rawReadme = String(req.body?.readme || '').trim();
+    const missingPrompts = [];
+    if (!rawName) missingPrompts.push({ field: 'name', question: 'Repo name?' });
+    if (!rawDesc) {
+      missingPrompts.push({ field: 'description', question: 'Repo description?' });
+    }
+    if (!rawReadme) {
+      missingPrompts.push({
+        field: 'readme',
+        question: 'Repo README? (Markdown content for README.md)',
+      });
+    }
+    if (missingPrompts.length > 0) {
+      recordAiAudit(db, req.aiKey, 'POST', '/api/v1/ai/wpc', 422);
+      return res.status(422).json({
+        ok: false,
+        needsInput: true,
+        message:
+          'To initialize this Cloudy Repo workspace, please provide Repo name, Repo description, and Repo README.',
+        questions: missingPrompts,
+      });
+    }
+
     try {
       const created = await createWorkspace(db, {
-        name: req.body?.name,
-        description: req.body?.description || '',
+        name: rawName,
+        description: rawDesc,
+        readme: rawReadme,
         branch: req.body?.branch || 'main',
-        template: req.body?.template || 'typescript',
+        template: req.body?.template || 'blank',
         initialFiles: Array.isArray(req.body?.files) ? req.body.files : null,
         authorName: req.aiKey.name || 'AI API',
       });

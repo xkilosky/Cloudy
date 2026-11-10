@@ -321,6 +321,7 @@ export const RepoView: React.FC<RepoViewProps> = ({
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [newName, setNewName] = useState('');
   const [newDesc, setNewDesc] = useState('');
+  const [newReadme, setNewReadme] = useState('');
   const [newBranch, setNewBranch] = useState('main');
   const [newTemplate, setNewTemplate] = useState<
     'typescript' | 'python_ai' | 'web_app' | 'blank'
@@ -447,6 +448,7 @@ export const RepoView: React.FC<RepoViewProps> = ({
         body: JSON.stringify({
           name: clean,
           description: newDesc.trim(),
+          readme: newReadme.trim(),
           branch: newBranch.trim() || 'main',
           template: newTemplate,
         }),
@@ -459,6 +461,7 @@ export const RepoView: React.FC<RepoViewProps> = ({
       setCreateModalOpen(false);
       setNewName('');
       setNewDesc('');
+      setNewReadme('');
       setNewBranch('main');
       setSelectedRepoId(data.repo.id);
       setCurrentSubfolderId(null);
@@ -1152,6 +1155,19 @@ export const RepoView: React.FC<RepoViewProps> = ({
                         className="w-full px-3 py-2 rounded-xl bg-canvas border border-line focus:border-accent/60 text-xs sm:text-sm font-mono text-ink focus:outline-none"
                       />
                     </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-ink-secondary mb-1">
+                      README.md <span className="text-ink-muted">(optional — auto-generated if blank)</span>
+                    </label>
+                    <textarea
+                      rows={3}
+                      value={newReadme}
+                      onChange={(e) => setNewReadme(e.target.value)}
+                      placeholder={`# ${newName.trim() || 'Cloudy-Core'}\n\nOverview, setup steps, and architecture notes...`}
+                      className="w-full px-3 py-2 rounded-xl bg-canvas border border-line focus:border-accent/60 text-xs font-mono text-ink focus:outline-none resize-y"
+                    />
                   </div>
 
                   <div>

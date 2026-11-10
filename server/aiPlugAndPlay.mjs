@@ -1539,16 +1539,17 @@ TOOLS = [
     },
     {
         "name": "create_wpc",
-        "description": "Initializes a new project workspace (wpc) in the user's Cloudy storage, creating the physical folder structure in their Cloud Pool.",
+        "description": "Initializes a new project workspace (wpc) in the user's Cloudy storage, creating the physical folder structure in their Cloud Pool. Requires Repo name, Repo description, and Repo README.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "Workspace / repo name"},
-                "description": {"type": "string", "description": "Optional summary"},
+                "name": {"type": "string", "description": "Repo name?"},
+                "description": {"type": "string", "description": "Repo description?"},
+                "readme": {"type": "string", "description": "Repo README? (Markdown content for README.md)"},
                 "branch": {"type": "string", "description": "Default branch (defaults to main)"},
-                "template": {"type": "string", "description": "typescript, python_ai, web_app, or blank"},
+                "template": {"type": "string", "description": "blank, typescript, python_ai, or web_app"},
             },
-            "required": ["name"],
+            "required": ["name", "description", "readme"],
         },
     },
     {
